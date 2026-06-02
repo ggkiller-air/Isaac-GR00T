@@ -57,6 +57,16 @@ class FinetuneConfig:
     tune_diffusion_model: bool = True
     """If True, fine-tune the diffusion-based action decoder (if present in the model)."""
 
+    use_tactile: bool = False
+    """If True, enable the tactile (skin-suit) encoder + touch-dreaming graft (HTD).
+    Requires the embodiment's modality config to declare a `tactile` modality
+    (e.g. unitree_g1_sonic). Adds tactile tokens to the action-head sequence and a
+    touch-dreaming auxiliary loss. Default False keeps the model unchanged."""
+
+    tune_tactile: bool = True
+    """If True (and use_tactile), train the tactile encoder / aggregator / dream head.
+    Set False to freeze them (e.g. to first warm up other modules)."""
+
     state_dropout_prob: float = 0.2
     """
     Dropout probability applied to state inputs for regularization during training.

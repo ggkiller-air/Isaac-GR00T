@@ -24,6 +24,20 @@ from transformers import PretrainedConfig
 from . import register_model_config
 
 
+def _default_tactile_valid_idx() -> list[int]:
+    """Default tactile valid-channel map for unitree_g1_sonic (lazy to avoid import cycles)."""
+    from gr00t.data.tactile_layout import get_valid_idx
+
+    return get_valid_idx()
+
+
+def _default_tactile_region_sizes() -> list[int]:
+    """Default per-region channel counts for unitree_g1_sonic (lazy import)."""
+    from gr00t.data.tactile_layout import get_region_sizes
+
+    return get_region_sizes()
+
+
 @dataclass
 class Gr00tN1d7Config(PretrainedConfig):
     """Unified configuration for Gr00tN1d7 model with backbone and action head.
@@ -120,6 +134,26 @@ class Gr00tN1d7Config(PretrainedConfig):
 
     # Multi-embodiment parameters
     max_num_embodiments: int = 32
+
+    # Tactile (skin-suit) modality + touch-dreaming (HTD graft, arXiv:2604.13015).
+    # `use_tactile` gates the entire feature: when False the model is byte-for-byte
+    # the original N1.7. The raw on-disk packet is `tactile_raw_dim` wide; the
+    # encoder selects `tactile_valid_idx` (256->112 for unitree_g1_sonic, defaulted
+    # from gr00t/data/tactile_layout.py) and splits them by `tactile_region_sizes`.
+    # If `tactile_valid_idx` is None, the encoder falls back to using all
+    # `tactile_raw_dim` channels as a single region (lets training start before a
+    # spec mapping is available).
+    use_tactile: bool = False
+    tactile_raw_dim: int = 256
+    tactile_valid_idx: list[int] | None = field(default_factory=_default_tactile_valid_idx)
+    tactile_region_sizes: list[int] | None = field(default_factory=_default_tactile_region_sizes)
+    n_tactile_tokens: int = 8  # number of slot tokens injected into sa_embs
+    tactile_hidden_dim: int = 512  # per-region / dream-head MLP hidden width
+    dream_horizon: int = 4  # tau: future tactile frames predicted (must be <= delta_indices reach)
+    ema_decay: float = 0.99  # EMA target-encoder decay (HTD Eq. 4)
+    lambda_tactile: float = 0.5  # weight of touch-dreaming loss in total loss
+    tactile_dream_beta: float = 1.0  # magnitude-term weight in touch-dreaming loss (anti-collapse)
+    tune_tactile: bool = True  # train the tactile encoder / aggregator / dream head
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

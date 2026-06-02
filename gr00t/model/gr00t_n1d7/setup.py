@@ -86,6 +86,11 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 tune_projector=self.config.model.tune_projector,
                 tune_diffusion_model=self.config.model.tune_diffusion_model,
                 tune_vlln=self.config.model.tune_vlln,
+                # Tactile graft: pass through so the (possibly tactile-free) base
+                # checkpoint is rebuilt with the tactile encoder + dream head when
+                # enabled. Defaults keep older configs byte-for-byte unchanged.
+                use_tactile=getattr(self.config.model, "use_tactile", False),
+                tune_tactile=getattr(self.config.model, "tune_tactile", True),
                 state_dropout_prob=self.config.model.state_dropout_prob,
                 backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
                 load_bf16=self.config.model.load_bf16,
@@ -105,7 +110,12 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
             unexpected_keys = loading_info.get("unexpected_keys", [])
             mismatched_keys = loading_info.get("mismatched_keys", [])
-            other_missing = [k for k in missing_keys if "mask_token" not in k]
+            # Tactile modules (encoder / EMA target / dream head) are new when
+            # finetuning a tactile-free base checkpoint; like mask_token, they are
+            # initialized fresh, so don't treat them as a load error.
+            other_missing = [
+                k for k in missing_keys if "mask_token" not in k and "tactile" not in k
+            ]
             errors = []
             if other_missing:
                 errors.append(f"Missing keys ({len(other_missing)}): {other_missing}")

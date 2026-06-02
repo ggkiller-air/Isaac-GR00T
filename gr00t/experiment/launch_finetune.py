@@ -79,6 +79,8 @@ if __name__ == "__main__":
     config.model.tune_visual = ft_config.tune_visual
     config.model.tune_projector = ft_config.tune_projector
     config.model.tune_diffusion_model = ft_config.tune_diffusion_model
+    config.model.use_tactile = ft_config.use_tactile
+    config.model.tune_tactile = ft_config.tune_tactile
     config.model.state_dropout_prob = ft_config.state_dropout_prob
     config.model.random_rotation_angle = ft_config.random_rotation_angle
     config.model.color_jitter_params = ft_config.color_jitter_params
@@ -89,7 +91,7 @@ if __name__ == "__main__":
 
     config.model.load_bf16 = False
     config.model.reproject_vision = False
-    config.model.model_name = "nvidia/Cosmos-Reason2-2B"
+    config.model.model_name = os.environ.get("GR00T_BACKBONE_NAME", "nvidia/Cosmos-Reason2-2B")
     config.model.backbone_trainable_params_fp32 = True
     config.model.use_relative_action = True
 

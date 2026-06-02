@@ -63,6 +63,9 @@ class VLAStepData:
     ]  # state_name -> np.ndarray (dim,) for single step or (horizon, dim) for trajectory
     actions: dict[str, np.ndarray]  # action_name -> np.ndarray (horizon, dim) for action chunk
     masks: dict[str, list[np.ndarray]] | None = None  # view_name -> list[np.ndarray] (H, W)
+    tactile: dict[str, np.ndarray] | None = (
+        None  # tactile_key -> np.ndarray (T, raw_dim); T = len(delta_indices), e.g. current + future frames for touch dreaming
+    )
     text: str | None = None  # Optional task description or instruction
     embodiment: EmbodimentTag = (
         EmbodimentTag.NEW_EMBODIMENT

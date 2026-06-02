@@ -30,6 +30,13 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
     CategorySpecificMLP,
     MultiEmbodimentActionEncoder,
 )
+from gr00t.model.modules.tactile_encoder import (
+    TactileDreamHead,
+    TactileEncoder,
+    build_ema_teacher,
+    ema_update,
+    touch_dreaming_loss,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -100,16 +107,59 @@ class Gr00tN1d7ActionHead(nn.Module):
 
         self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
         self.num_timestep_buckets = config.num_timestep_buckets
+
+        # Tactile (skin-suit) modality + touch-dreaming (HTD graft). Gated by
+        # `use_tactile`; when False none of these modules exist and the model is
+        # identical to the original N1.7.
+        self.use_tactile = config.use_tactile
+        if self.use_tactile:
+            if config.tactile_valid_idx is not None:
+                tactile_valid_idx = list(config.tactile_valid_idx)
+                tactile_region_sizes = list(config.tactile_region_sizes)
+            else:
+                # No spec mapping yet: use the whole raw packet as a single region.
+                tactile_valid_idx = list(range(config.tactile_raw_dim))
+                tactile_region_sizes = [config.tactile_raw_dim]
+            self.dream_horizon = config.dream_horizon
+            self.ema_decay = config.ema_decay
+            self.lambda_tactile = config.lambda_tactile
+            self.tactile_dream_beta = config.tactile_dream_beta
+            self.n_tactile_tokens = config.n_tactile_tokens
+            self.tactile_encoder = TactileEncoder(
+                raw_dim=config.tactile_raw_dim,
+                valid_idx=tactile_valid_idx,
+                region_sizes=tactile_region_sizes,
+                embed_dim=self.input_embedding_dim,
+                num_tokens=config.n_tactile_tokens,
+                hidden_dim=config.tactile_hidden_dim,
+            )
+            # Frozen EMA target encoder producing touch-dreaming latent targets.
+            self.tactile_target_encoder = build_ema_teacher(self.tactile_encoder)
+            self.tactile_dream_head = TactileDreamHead(
+                in_dim=self.hidden_size,
+                latent_dim=self.input_embedding_dim,
+                dream_horizon=config.dream_horizon,
+                hidden_dim=config.tactile_hidden_dim,
+            )
+
         self.set_trainable_parameters(
-            config.tune_projector, config.tune_diffusion_model, config.tune_vlln
+            config.tune_projector,
+            config.tune_diffusion_model,
+            config.tune_vlln,
+            config.tune_tactile,
         )
 
     def set_trainable_parameters(
-        self, tune_projector: bool, tune_diffusion_model: bool, tune_vlln: bool
+        self,
+        tune_projector: bool,
+        tune_diffusion_model: bool,
+        tune_vlln: bool,
+        tune_tactile: bool = True,
     ):
         self.tune_projector = tune_projector
         self.tune_diffusion_model = tune_diffusion_model
         self.tune_vlln = tune_vlln
+        self.tune_tactile = tune_tactile
         for p in self.parameters():
             p.requires_grad = True
         if not tune_projector:
@@ -123,6 +173,12 @@ class Gr00tN1d7ActionHead(nn.Module):
         if not tune_vlln:
             self.vlln.requires_grad_(False)
             self.vl_self_attention.requires_grad_(False)
+        if getattr(self, "use_tactile", False):
+            # The EMA target encoder is updated by ema_update, never by gradients.
+            self.tactile_target_encoder.requires_grad_(False)
+            if not tune_tactile:
+                self.tactile_encoder.requires_grad_(False)
+                self.tactile_dream_head.requires_grad_(False)
         logger.debug(f"Tune action head projector: {self.tune_projector}")
         logger.debug(f"Tune action head diffusion model: {self.tune_diffusion_model}")
         logger.debug(f"Tune action head vlln: {self.tune_vlln}")
@@ -152,6 +208,33 @@ class Gr00tN1d7ActionHead(nn.Module):
             if not self.tune_vlln:
                 self.vlln.eval()
                 self.vl_self_attention.eval()
+            if getattr(self, "use_tactile", False):
+                # EMA target encoder is always in eval; student only if frozen.
+                self.tactile_target_encoder.eval()
+                if not getattr(self, "tune_tactile", True):
+                    self.tactile_encoder.eval()
+                    self.tactile_dream_head.eval()
+
+    def _tactile_features(
+        self, action_input: BatchFeature, batch_size: int, device
+    ) -> torch.Tensor:
+        """Encode the current-frame tactile packet into ``[B, n_tactile_tokens, emb]``.
+
+        Accepts tactile as ``[B, T, raw_dim]`` (windowed training input) or
+        ``[B, raw_dim]`` (single-step inference). Falls back to zeros when tactile
+        is absent, so the ``sa_embs`` sequence structure stays consistent.
+        """
+        tactile_raw = getattr(action_input, "tactile", None)
+        if tactile_raw is None:
+            dtype = self.tactile_encoder.aggregator.norm.weight.dtype
+            current = torch.zeros(
+                batch_size, self.config.tactile_raw_dim, device=device, dtype=dtype
+            )
+        elif tactile_raw.dim() == 3:
+            current = tactile_raw[:, 0]
+        else:
+            current = tactile_raw
+        return self.tactile_encoder(current)
 
     def sample_time(self, batch_size, device, dtype):
         sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
@@ -230,8 +313,14 @@ class Gr00tN1d7ActionHead(nn.Module):
             pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
             action_features = action_features + pos_embs
 
-        # Join vision, language, state and action embedding along sequence dimension.
-        sa_embs = torch.cat((state_features, action_features), dim=1)
+        # Encode current-frame tactile into slot tokens; inject before the action
+        # tokens so the tail-anchored action decode (pred[:, -action_horizon:]) is
+        # unaffected. state(1) | tactile(N) | action(40).
+        if self.use_tactile:
+            tactile_features = self._tactile_features(action_input, actions.shape[0], device)
+            sa_embs = torch.cat((state_features, tactile_features, action_features), dim=1)
+        else:
+            sa_embs = torch.cat((state_features, action_features), dim=1)
         vl_attn_mask = backbone_output.backbone_attention_mask
 
         if self.config.use_alternate_vl_dit:
@@ -263,13 +352,40 @@ class Gr00tN1d7ActionHead(nn.Module):
         action_loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
         loss = action_loss.sum() / (action_mask.sum() + 1e-6)
 
-        return {
+        outputs = {
             "loss": loss,
             "action_loss": action_loss,
             "action_mask": action_mask,
             "backbone_features": vl_embeds,
             "state_features": state_features,
         }
+
+        # Touch-dreaming auxiliary loss: from the shared trunk features, predict the
+        # future tactile latent encoded by the slow EMA target encoder (HTD Eq. 8/9).
+        # This is the component the paper finds gives a stable gain; the encoder
+        # alone (tactile as plain input) is unreliable. Training-only.
+        if self.use_tactile:
+            tactile_raw = getattr(action_input, "tactile", None)
+            if (
+                tactile_raw is not None
+                and tactile_raw.dim() == 3
+                and tactile_raw.shape[1] >= self.dream_horizon + 1
+            ):
+                # Slow-moving EMA update of the target encoder (no gradient).
+                ema_update(self.tactile_target_encoder, self.tactile_encoder, self.ema_decay)
+                future_raw = tactile_raw[:, 1 : 1 + self.dream_horizon]
+                with torch.no_grad():
+                    target_latent = self.tactile_target_encoder.encode_pooled(future_raw)
+                # Pool trunk features over the tactile token positions [1 : 1 + N].
+                tactile_trunk = model_output[:, 1 : 1 + self.n_tactile_tokens].mean(dim=1)
+                dream_pred = self.tactile_dream_head(tactile_trunk)
+                tactile_loss = touch_dreaming_loss(
+                    dream_pred, target_latent, self.tactile_dream_beta
+                )
+                outputs["loss"] = loss + self.lambda_tactile * tactile_loss
+                outputs["tactile_loss"] = tactile_loss.detach()
+
+        return outputs
 
     def _encode_features(
         self, backbone_output: BatchFeature, action_input: BatchFeature
@@ -379,6 +495,12 @@ class Gr00tN1d7ActionHead(nn.Module):
                 :,
             ] = ramp[None, :, None].to(device)
 
+        # Encode tactile once (constant across denoising steps); inference runs only
+        # the encoder, the dream head is training-only.
+        tactile_features = (
+            self._tactile_features(action_input, batch_size, device) if self.use_tactile else None
+        )
+
         # Run denoising steps.
         for t in range(self.num_inference_timesteps):
             t_cont = t / float(self.num_inference_timesteps)  # e.g. goes 0, 1/N, 2/N, ...
@@ -396,7 +518,12 @@ class Gr00tN1d7ActionHead(nn.Module):
                 action_features = action_features + pos_embs
 
             # Join vision, language, state and action embedding along sequence dimension.
-            sa_embs = torch.cat((state_features, action_features), dim=1)
+            if self.use_tactile:
+                sa_embs = torch.cat(
+                    (state_features, tactile_features, action_features), dim=1
+                )
+            else:
+                sa_embs = torch.cat((state_features, action_features), dim=1)
 
             # Run model forward.
             if self.config.use_alternate_vl_dit:

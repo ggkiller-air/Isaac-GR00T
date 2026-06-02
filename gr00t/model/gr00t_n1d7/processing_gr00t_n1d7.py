@@ -470,6 +470,22 @@ class Gr00tN1d7Processor(BaseProcessor):
             action_mask[:, :action_horizon] = 1.0
         transformed_observation["action_mask"] = action_mask
 
+        # Tactile (optional at inference): forward the raw packet if the live
+        # observation provides it. When absent, the model zero-fills it, so existing
+        # tactile-free SONIC inference keeps working.
+        tactile_cfg = modality_config.get("tactile")
+        if tactile_cfg is not None and all(
+            f"tactile.{key}" in observation for key in tactile_cfg.modality_keys
+        ):
+            tactile_arr = np.concatenate(
+                [
+                    np.asarray(observation[f"tactile.{key}"], dtype=np.float32)
+                    for key in tactile_cfg.modality_keys
+                ],
+                axis=-1,
+            )
+            transformed_observation["tactile"] = torch.from_numpy(tactile_arr)
+
         return BatchFeature(transformed_observation)
 
     def _apply_vlm_processing(self, images: np.ndarray, language: str) -> BatchFeature:
@@ -628,6 +644,20 @@ class Gr00tN1d7Processor(BaseProcessor):
         if action_mask is not None:
             transformed_inputs["action_mask"] = action_mask
         transformed_inputs["embodiment_id"] = self.embodiment_id_mapping[embodiment_tag.value]
+
+        # Tactile: forward the raw skin packet [T, raw_dim] verbatim. The 256->112
+        # valid-channel select and /255 happen in the tactile encoder. T equals the
+        # number of tactile delta_indices (current frame + future touch-dreaming
+        # targets). The collator stacks this into [B, T, raw_dim].
+        tactile_cfg = self.modality_configs[embodiment_tag.value].get("tactile")
+        if tactile_cfg is not None and content.tactile is not None:
+            tactile_arr = np.concatenate(
+                [content.tactile[key] for key in tactile_cfg.modality_keys], axis=-1
+            )
+            transformed_inputs["tactile"] = torch.from_numpy(
+                np.ascontiguousarray(tactile_arr)
+            ).to(torch.float32)
+
         return transformed_inputs
 
     def _get_vlm_inputs(

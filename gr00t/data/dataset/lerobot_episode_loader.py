@@ -56,7 +56,7 @@ LEROBOT_MODALITY_FILENAME = "modality.json"
 LEROBOT_STATS_FILE_NAME = "stats.json"
 LEROBOT_RELATIVE_STATS_FILE_NAME = "relative_stats.json"
 
-ALLOWED_MODALITIES = ["video", "state", "action", "language", "mask"]
+ALLOWED_MODALITIES = ["video", "state", "action", "language", "mask", "tactile"]
 DEFAULT_COLUMN_NAMES = {
     "state": "observation.state",
     "action": "action",
@@ -392,6 +392,17 @@ class LeRobotEpisodeLoader:
             )
             for joint_group in joint_groups_df.columns:
                 loaded_df[f"{modality_type}.{joint_group}"] = joint_groups_df[joint_group]
+
+        # Tactile modality: load the raw sensor column verbatim (no slicing).
+        # modality.json registers tactile keys with only an `original_key` (no
+        # start/end), so they must bypass _extract_joint_groups. Valid-channel
+        # selection (256 -> 112) and /255 normalization happen downstream in the
+        # processor / tactile encoder, not here.
+        if "tactile" in self.modality_configs:
+            tactile_meta = self.modality_meta.get("tactile", {})
+            for key in self.modality_configs["tactile"].modality_keys:
+                original_key = tactile_meta.get(key, {}).get("original_key", f"observation.{key}")
+                loaded_df[f"tactile.{key}"] = original_df[original_key]
 
         return loaded_df
 
