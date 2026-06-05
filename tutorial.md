@@ -14,14 +14,14 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 uv run torchrun --nproc_per_node=4 --master_port=29500 \
     gr00t/experiment/launch_finetune.py \
     --base-model-path nvidia/GR00T-N1.7-3B \
-    --dataset-path data_collection/carry-bucket-stereo \
+    --dataset-path data/carry-bucket-stereo \
     --embodiment-tag UNITREE_G1_SONIC \
     --modality-config-path gr00t/configs/data/embodiment_configs.py \
     --num-gpus $NUM_GPUS \
-    --output-dir outputs \
-    --save-total-limit 5 \
-    --save-steps 5000 \
-    --max-steps 20000 \
+    --output-dir outputs/tactile_ft \
+    --save-total-limit 7 \
+    --save-steps 10000 \
+    --max-steps 80000 \
     --use-wandb \
     --global-batch-size 32 \
     --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \

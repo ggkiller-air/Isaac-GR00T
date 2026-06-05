@@ -40,6 +40,7 @@ import copy
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from gr00t.model.modules.embodiment_conditioned_mlp import SmallMLP
 
@@ -87,7 +88,11 @@ class TactileSlotAggregator(nn.Module):
         # region_tokens: [B, num_regions, embed_dim] -> [B, num_tokens, embed_dim]
         batch = region_tokens.shape[0]
         query = self.query.unsqueeze(0).expand(batch, -1, -1).to(region_tokens.dtype)
-        attended, _ = self.attn(query, region_tokens, region_tokens, need_weights=False)
+        # Force the math SDPA backend: head_dim=192 (embed_dim/num_heads) hits a NaN
+        # bug in the flash-attention *backward* kernel under bf16. This attention is
+        # tiny (num_tokens queries x num_regions keys), so the cost is negligible.
+        with sdpa_kernel([SDPBackend.MATH]):
+            attended, _ = self.attn(query, region_tokens, region_tokens, need_weights=False)
         return self.norm(attended)
 
 
