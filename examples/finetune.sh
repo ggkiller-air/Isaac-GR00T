@@ -152,7 +152,5 @@ if [ "$NUM_GPUS" = "1" ]; then
     # Restrict to a single GPU so HF Trainer doesn't wrap the model in DataParallel,
     # which crashes with a StopIteration error in the model's device property.
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-    exec python "${LAUNCH_CMD[@]}"
 fi
 
-exec torchrun --nproc_per_node="$NUM_GPUS" --master_port="$MASTER_PORT" "${LAUNCH_CMD[@]}"

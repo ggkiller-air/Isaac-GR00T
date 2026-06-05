@@ -99,3 +99,6 @@ demo_data/        sample datasets (git-lfs) used by tests/fixtures
 - CI: internal GitLab CI (`.gitlab-ci.yml` + `ci/`, not in the public repo) plus public GitHub Actions (`.github/workflows/`). Pytest uses `junit_duration_report = "total"` so fixture setup counts toward reported test time.
 - CUDA 13.x (Thor/Spark/GB300): PyTorch 2.7 pins Triton 3.3.1, which rejects CUDA 13+. Run `uv run bash scripts/patch_triton_cuda13.sh`. `torch.compile` is unsupported on GB300 (sm_103) — use eager or TensorRT.
 - `AGENTS.md` is a symlink to this file.
+
+# Attention
+回答问题时避免过分的夸赞。请记住，你的回答不一定是对的，我的判断也不一定是对的。对待所有问题都要反复推敲，优先保证准确性，必要时你可以主动向我索要补充信息或证据，回答时保持结构化输出，条理清晰。

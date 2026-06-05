@@ -67,7 +67,11 @@ MODALITY_CONFIGS = {
     "unitree_g1_sonic": {
         "video": ModalityConfig(
             delta_indices=[0],
-            modality_keys=["ego_view"],
+            modality_keys=["ego_view_left", "ego_view_right"],
+        ),
+        "tactile" : ModalityConfig(
+            delta_indices=list(range(5)),
+            modality_keys=["tactile_raw"],
         ),
         "state": ModalityConfig(
             delta_indices=[0],
