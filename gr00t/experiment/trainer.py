@@ -324,6 +324,28 @@ class Gr00tTrainer(Trainer):
         self.loss = loss
 
         # --------------------------------------------------------------
+        # Component losses (action vs tactile) for wandb.
+        # Total `loss` already includes lambda_tactile * tactile_loss, so logging
+        # the action term separately lets it be compared apples-to-apples with
+        # non-tactile runs (whose total loss == action loss). Keys are logged
+        # without a prefix; HF's wandb callback rewrites them to train/* (matching
+        # train/loss). Gather across ranks and log on rank 0 only.
+        # --------------------------------------------------------------
+        if self.state.global_step % self.args.logging_steps == 0 and model.training:
+            component_logs = {}
+            if "action_loss" in outputs and "action_mask" in outputs:
+                action_mask = outputs["action_mask"]
+                action_scalar = (
+                    outputs["action_loss"].sum() / (action_mask.sum() + 1e-6)
+                ).detach()
+                component_logs["action_loss"] = self._nested_gather(action_scalar).mean().item()
+            if outputs.get("tactile_loss") is not None:
+                tactile_scalar = outputs["tactile_loss"].detach().to(loss.device)
+                component_logs["tactile_loss"] = self._nested_gather(tactile_scalar).mean().item()
+            if self.args.local_rank in (-1, 0) and component_logs:
+                self.log(component_logs)
+
+        # --------------------------------------------------------------
         # Accuracy calculation
         # --------------------------------------------------------------
         if (

@@ -67,6 +67,17 @@ class FinetuneConfig:
     """If True (and use_tactile), train the tactile encoder / aggregator / dream head.
     Set False to freeze them (e.g. to first warm up other modules)."""
 
+    tactile_encoder_type: str = "mlp"
+    """Per-region tactile encoder (only when use_tactile). "mlp" (default) runs a
+    flat per-region MLP; "cnn" runs a per-region 2D conv over each region's
+    (rows, cols) sensel grid -> adaptive pool -> MLP fuse. Switching requires
+    retraining (new params); "mlp" keeps prior runs byte-for-byte unchanged."""
+
+    tactile_cnn_coord: bool = False
+    """If True (and tactile_encoder_type == "cnn"), add CoordConv row/col position
+    channels so the pooled CNN can encode where in a region a contact lands.
+    No effect on the mlp encoder."""
+
     state_dropout_prob: float = 0.2
     """
     Dropout probability applied to state inputs for regularization during training.

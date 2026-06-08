@@ -18,15 +18,17 @@ uv run torchrun --nproc_per_node=4 --master_port=29500 \
     --embodiment-tag UNITREE_G1_SONIC \
     --modality-config-path gr00t/configs/data/embodiment_configs.py \
     --num-gpus $NUM_GPUS \
-    --output-dir outputs/tactile_ft \
-    --save-total-limit 7 \
+    --output-dir outputs/tactile_no \
+    --save-total-limit 1 \
     --save-steps 10000 \
-    --max-steps 80000 \
+    --max-steps 20000 \
     --use-wandb \
     --global-batch-size 32 \
     --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
     --dataloader-num-workers 4 \
-    --use-tactile 
+    --use-tactile \
+    --tactile-encoder-type cnn \
+    --tactile-cnn-coord
 ```
 
 # 2. tactile flow graph

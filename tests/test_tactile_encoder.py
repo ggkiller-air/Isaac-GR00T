@@ -15,9 +15,7 @@
 
 """CPU-only shape/behavior tests for the tactile encoder + touch-dreaming heads."""
 
-import torch
-
-from gr00t.data.tactile_layout import get_region_sizes, get_valid_idx
+from gr00t.data.tactile_layout import get_region_grids, get_region_sizes, get_valid_idx
 from gr00t.model.modules.tactile_encoder import (
     TactileDreamHead,
     TactileEncoder,
@@ -25,6 +23,8 @@ from gr00t.model.modules.tactile_encoder import (
     ema_update,
     touch_dreaming_loss,
 )
+import torch
+
 
 EMBED = 1536
 N_TOKENS = 8
@@ -56,6 +56,72 @@ def test_encoder_six_region_shapes():
     assert pooled.shape == (3, TAU, EMBED)
     pooled1 = enc.encode_pooled(raw)
     assert pooled1.shape == (3, EMBED)
+
+
+def _make_cnn_encoder(valid_idx, region_sizes, region_grids):
+    return TactileEncoder(
+        raw_dim=RAW,
+        valid_idx=valid_idx,
+        region_sizes=region_sizes,
+        embed_dim=EMBED,
+        num_tokens=N_TOKENS,
+        hidden_dim=HIDDEN,
+        encoder_type="cnn",
+        region_grids=region_grids,
+        cnn_channels=8,  # small for a fast CPU test
+        cnn_pool=(2, 2),
+    )
+
+
+def test_cnn_encoder_six_region_shapes():
+    # get_region_grids() includes the degenerate 1x4 shoulder strips, exercising
+    # the pool-clamp path (pool (2,2) -> (1,2) for a 1-row region).
+    enc = _make_cnn_encoder(get_valid_idx(), get_region_sizes(), get_region_grids())
+    raw = torch.randint(0, 256, (3, RAW)).float()
+    assert enc(raw).shape == (3, N_TOKENS, EMBED)
+    raw_seq = torch.randint(0, 256, (3, TAU, RAW)).float()
+    assert enc.encode_pooled(raw_seq).shape == (3, TAU, EMBED)
+
+
+def test_cnn_encoder_backward_flows():
+    enc = _make_cnn_encoder(get_valid_idx(), get_region_sizes(), get_region_grids())
+    raw = torch.randint(0, 256, (2, RAW)).float()
+    enc(raw).sum().backward()
+    grads = [p.grad for p in enc.parameters() if p.grad is not None]
+    assert len(grads) > 0
+    assert any(float(g.abs().sum()) > 0 for g in grads)
+
+
+def test_cnn_encoder_coordconv_shapes_and_backward():
+    # CoordConv adds 2 input channels; first conv must accept 3 in-channels and the
+    # 1x4 shoulder strips (row coord -> 0) must not break.
+    enc = TactileEncoder(
+        raw_dim=RAW,
+        valid_idx=get_valid_idx(),
+        region_sizes=get_region_sizes(),
+        embed_dim=EMBED,
+        num_tokens=N_TOKENS,
+        hidden_dim=HIDDEN,
+        encoder_type="cnn",
+        region_grids=get_region_grids(),
+        cnn_channels=8,
+        cnn_pool=(2, 2),
+        cnn_coord=True,
+    )
+    assert enc.per_region.branches[0][0].in_channels == 3
+    raw = torch.randint(0, 256, (2, RAW)).float()
+    out = enc(raw)
+    assert out.shape == (2, N_TOKENS, EMBED)
+    out.sum().backward()
+    grads = [p.grad for p in enc.parameters() if p.grad is not None]
+    assert any(float(g.abs().sum()) > 0 for g in grads)
+
+
+def test_cnn_encoder_rejects_grid_size_mismatch():
+    import pytest
+
+    with pytest.raises(AssertionError):
+        _make_cnn_encoder(get_valid_idx(), get_region_sizes(), [(6, 8)])  # wrong #regions
 
 
 def test_encoder_fallback_single_region():

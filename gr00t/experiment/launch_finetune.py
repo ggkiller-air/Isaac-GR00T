@@ -81,6 +81,8 @@ if __name__ == "__main__":
     config.model.tune_diffusion_model = ft_config.tune_diffusion_model
     config.model.use_tactile = ft_config.use_tactile
     config.model.tune_tactile = ft_config.tune_tactile
+    config.model.tactile_encoder_type = ft_config.tactile_encoder_type
+    config.model.tactile_cnn_coord = ft_config.tactile_cnn_coord
     config.model.state_dropout_prob = ft_config.state_dropout_prob
     config.model.random_rotation_angle = ft_config.random_rotation_angle
     config.model.color_jitter_params = ft_config.color_jitter_params

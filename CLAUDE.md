@@ -100,5 +100,17 @@ demo_data/        sample datasets (git-lfs) used by tests/fixtures
 - CUDA 13.x (Thor/Spark/GB300): PyTorch 2.7 pins Triton 3.3.1, which rejects CUDA 13+. Run `uv run bash scripts/patch_triton_cuda13.sh`. `torch.compile` is unsupported on GB300 (sm_103) — use eager or TensorRT.
 - `AGENTS.md` is a symlink to this file.
 
+## 触觉表征改进 · 数据裁决（carry-bucket-stereo，62 ep / 106441 帧；暂存至下次主动提起）
+
+数据特征：valid 112 ch 中 85.6% 为 0、不饱和（max 231）；帧间自相关 0.997；活跃区近静态（左主导，右臂/右肩≈死）。
+
+| 方向 | 裁决 | 依据 |
+|---|---|---|
+| 加过去帧 temporal | ❌ 毙 | 帧间自相关 0.997、Δ/std 0.028，raw 堆叠冗余 |
+| contact-aware / region bias | ❌ 降级 | 活跃区近静态，slot attention 已能学到 |
+| 输入非线性缩放（sqrt/log + 可选死区≤2~3） | ✅ 唯一数据支持的杠杆 | 重尾稀疏，中位接触 8/255≈0.03 贴地板，sqrt 拉到 0.18 |
+
+落地点：仅 `tactile_encoder.py::select_and_normalize`（train/infer 自动一致），需重训；建议本次部署用现有 /255 版做 baseline，并行起 sqrt 变体对比。
+
 # Attention
 回答问题时避免过分的夸赞。请记住，你的回答不一定是对的，我的判断也不一定是对的。对待所有问题都要反复推敲，优先保证准确性，必要时你可以主动向我索要补充信息或证据，回答时保持结构化输出，条理清晰。

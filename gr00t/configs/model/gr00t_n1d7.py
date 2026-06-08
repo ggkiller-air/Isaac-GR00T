@@ -38,6 +38,24 @@ def _default_tactile_region_sizes() -> list[int]:
     return get_region_sizes()
 
 
+def _default_tactile_region_rows() -> list[int]:
+    """Default per-region row counts for unitree_g1_sonic (lazy import).
+
+    Stored flat (not as (rows, cols) tuples) because OmegaConf -- used by
+    ``experiment.run`` -- rejects nested-tuple-typed dataclass fields.
+    """
+    from gr00t.data.tactile_layout import get_region_grids
+
+    return [rows for rows, _ in get_region_grids()]
+
+
+def _default_tactile_region_cols() -> list[int]:
+    """Default per-region column counts for unitree_g1_sonic (lazy import)."""
+    from gr00t.data.tactile_layout import get_region_grids
+
+    return [cols for _, cols in get_region_grids()]
+
+
 @dataclass
 class Gr00tN1d7Config(PretrainedConfig):
     """Unified configuration for Gr00tN1d7 model with backbone and action head.
@@ -147,6 +165,26 @@ class Gr00tN1d7Config(PretrainedConfig):
     tactile_raw_dim: int = 256
     tactile_valid_idx: list[int] | None = field(default_factory=_default_tactile_valid_idx)
     tactile_region_sizes: list[int] | None = field(default_factory=_default_tactile_region_sizes)
+    # Per-region encoder: "mlp" (default; flat per-region MLP) or "cnn" (per-region
+    # 2D conv over each region's (rows, cols) grid -> adaptive pool -> MLP fuse).
+    tactile_encoder_type: str = "mlp"
+    # Per-region (rows, cols) grid as two flat int lists (used only when
+    # tactile_encoder_type == "cnn"). Flat rather than (rows, cols) tuples because
+    # OmegaConf.create in experiment.run rejects nested-tuple-typed fields.
+    tactile_region_rows: list[int] | None = field(default_factory=_default_tactile_region_rows)
+    tactile_region_cols: list[int] | None = field(default_factory=_default_tactile_region_cols)
+    tactile_cnn_channels: int = 32  # conv channels per region (cnn encoder only)
+    tactile_cnn_pool: list[int] = field(
+        default_factory=lambda: [2, 2]
+    )  # adaptive-pool (h, w) spatial size (cnn encoder only)
+    # CoordConv: add normalized row/col position channels so the pooled CNN can
+    # encode *where* in a region a contact lands (cnn encoder only).
+    tactile_cnn_coord: bool = False
+    # Scale on the [-1, 1] CoordConv channels. At 1.0 they dominate the ~0.04-std
+    # value channel and ill-condition the conv (grad spikes, loss stalls). Measured
+    # value std gives a principled range ~0.06-0.13; 0.1 is the default. No CLI flag
+    # by design -- edit here to sweep.
+    tactile_cnn_coord_scale: float = 0.1
     n_tactile_tokens: int = 8  # number of slot tokens injected into sa_embs
     tactile_hidden_dim: int = 512  # per-region / dream-head MLP hidden width
     dream_horizon: int = 4  # tau: future tactile frames predicted (must be <= delta_indices reach)

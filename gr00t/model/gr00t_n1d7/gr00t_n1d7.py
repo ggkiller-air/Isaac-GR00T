@@ -113,13 +113,25 @@ class Gr00tN1d7ActionHead(nn.Module):
         # identical to the original N1.7.
         self.use_tactile = config.use_tactile
         if self.use_tactile:
+            tactile_encoder_type = getattr(config, "tactile_encoder_type", "mlp")
             if config.tactile_valid_idx is not None:
                 tactile_valid_idx = list(config.tactile_valid_idx)
                 tactile_region_sizes = list(config.tactile_region_sizes)
+                # Grids stored as two flat int lists (OmegaConf-safe); zip back.
+                tactile_region_rows = getattr(config, "tactile_region_rows", None)
+                tactile_region_cols = getattr(config, "tactile_region_cols", None)
+                tactile_region_grids = (
+                    list(zip(tactile_region_rows, tactile_region_cols))
+                    if tactile_region_rows is not None and tactile_region_cols is not None
+                    else None
+                )
             else:
                 # No spec mapping yet: use the whole raw packet as a single region.
+                # A single flat region has no 2D grid, so force the MLP encoder.
                 tactile_valid_idx = list(range(config.tactile_raw_dim))
                 tactile_region_sizes = [config.tactile_raw_dim]
+                tactile_region_grids = None
+                tactile_encoder_type = "mlp"
             self.dream_horizon = config.dream_horizon
             self.ema_decay = config.ema_decay
             self.lambda_tactile = config.lambda_tactile
@@ -132,6 +144,12 @@ class Gr00tN1d7ActionHead(nn.Module):
                 embed_dim=self.input_embedding_dim,
                 num_tokens=config.n_tactile_tokens,
                 hidden_dim=config.tactile_hidden_dim,
+                encoder_type=tactile_encoder_type,
+                region_grids=tactile_region_grids,
+                cnn_channels=getattr(config, "tactile_cnn_channels", 32),
+                cnn_pool=getattr(config, "tactile_cnn_pool", (2, 2)),
+                cnn_coord=getattr(config, "tactile_cnn_coord", False),
+                cnn_coord_scale=getattr(config, "tactile_cnn_coord_scale", 1.0),
             )
             # Frozen EMA target encoder producing touch-dreaming latent targets.
             self.tactile_target_encoder = build_ema_teacher(self.tactile_encoder)
@@ -519,9 +537,7 @@ class Gr00tN1d7ActionHead(nn.Module):
 
             # Join vision, language, state and action embedding along sequence dimension.
             if self.use_tactile:
-                sa_embs = torch.cat(
-                    (state_features, tactile_features, action_features), dim=1
-                )
+                sa_embs = torch.cat((state_features, tactile_features, action_features), dim=1)
             else:
                 sa_embs = torch.cat((state_features, action_features), dim=1)
 

@@ -39,8 +39,8 @@ import copy
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
+import torch.nn.functional as F
 
 from gr00t.model.modules.embodiment_conditioned_mlp import SmallMLP
 
@@ -69,6 +69,88 @@ class PerRegionTactileEncoder(nn.Module):
         return torch.stack(tokens, dim=1)
 
 
+class PerRegionTactileCNNEncoder(nn.Module):
+    """Encode each region with a small 2D CNN over its ``(rows, cols)`` grid.
+
+    Mirrors :class:`PerRegionTactileEncoder`'s interface (flat valid vector in,
+    ``[B, num_regions, output_dim]`` out) but exploits the per-region spatial
+    layout from ``tactile_layout``: each region slice is reshaped to
+    ``[B, 1, rows, cols]`` (row-major), passed through a single ``3x3`` conv,
+    adaptively pooled to a fixed ``(pool_h, pool_w)`` resolution, flattened, and
+    fused by a linear projection to ``output_dim`` -- the recipe described for
+    per-finger/region tactile embeddings. ``padding=1`` 3x3 conv handles any grid
+    ``>= 1x1`` (including the degenerate ``1xN`` shoulder strips); the pool size
+    is clamped to each region's grid so a ``1xN`` strip is never up-sampled.
+
+    When ``coord`` is set, two constant CoordConv (Liu et al. 2018) channels --
+    normalized row/col position in ``[-1, 1]`` -- are concatenated to the value
+    grid before the conv, so the otherwise translation-equivariant + pooled CNN
+    can encode *where* in the region a contact lands (a 1-row strip gets a 0
+    row-coordinate). The coords are recomputed per forward to match the input's
+    device/dtype; the cost is negligible for these tiny grids.
+    """
+
+    def __init__(
+        self,
+        region_grids: list[tuple[int, int]],
+        output_dim: int,
+        channels: int = 32,
+        pool: tuple[int, int] = (2, 2),
+        coord: bool = False,
+        coord_scale: float = 1.0,
+    ):
+        super().__init__()
+        self.region_grids = [(int(r), int(c)) for r, c in region_grids]
+        self.coord = coord
+        # CoordConv channels span [-1, 1] (std ~0.7), but the value channel after
+        # /255 has std ~0.04 (mostly zeros). Left at 1.0 the coords *dominate* and
+        # *ill-condition* the per-region conv (grad spikes, loss stalls). Scaling
+        # them to value range (~0.06-0.13 matches measured std) fixes this.
+        self.coord_scale = float(coord_scale)
+        in_channels = 1 + (2 if coord else 0)  # value (+ row/col coord if CoordConv)
+        self.branches = nn.ModuleList()
+        self.projections = nn.ModuleList()
+        for rows, cols in self.region_grids:
+            ph, pw = min(int(pool[0]), rows), min(int(pool[1]), cols)
+            self.branches.append(
+                nn.Sequential(
+                    nn.Conv2d(in_channels, channels, kernel_size=3, padding=1),
+                    nn.ReLU(inplace=True),
+                    nn.AdaptiveAvgPool2d((ph, pw)),
+                )
+            )
+            # Per-region projection: pooled flat width (channels*ph*pw) differs
+            # per region because ph/pw are clamped to the grid.
+            self.projections.append(nn.Linear(channels * ph * pw, output_dim))
+
+    @staticmethod
+    def _axis_coord(n: int, device, dtype) -> torch.Tensor:
+        # Normalized axis position in [-1, 1]; a single cell maps to 0 (center).
+        if n == 1:
+            return torch.zeros(1, device=device, dtype=dtype)
+        return torch.linspace(-1.0, 1.0, n, device=device, dtype=dtype)
+
+    def forward(self, x_valid: torch.Tensor) -> torch.Tensor:
+        # x_valid: [B, sum(rows*cols)] -> [B, num_regions, output_dim]
+        sizes = [rows * cols for rows, cols in self.region_grids]
+        parts = torch.split(x_valid, sizes, dim=-1)
+        tokens = []
+        for (rows, cols), conv, proj, part in zip(
+            self.region_grids, self.branches, self.projections, parts
+        ):
+            batch = part.shape[0]
+            grid = part.reshape(batch, 1, rows, cols)
+            if self.coord:
+                row_c = self._axis_coord(rows, grid.device, grid.dtype) * self.coord_scale
+                col_c = self._axis_coord(cols, grid.device, grid.dtype) * self.coord_scale
+                ch = row_c.view(1, 1, rows, 1).expand(batch, 1, rows, cols)
+                cw = col_c.view(1, 1, 1, cols).expand(batch, 1, rows, cols)
+                grid = torch.cat([grid, ch, cw], dim=1)
+            feat = conv(grid).flatten(1)
+            tokens.append(proj(feat))
+        return torch.stack(tokens, dim=1)
+
+
 class TactileSlotAggregator(nn.Module):
     """Aggregate variable region tokens into a fixed set of ``N`` slot tokens.
 
@@ -79,9 +161,7 @@ class TactileSlotAggregator(nn.Module):
     def __init__(self, embed_dim: int, num_tokens: int, num_heads: int = 8):
         super().__init__()
         self.query = nn.Parameter(torch.randn(num_tokens, embed_dim) * 0.02)
-        self.attn = nn.MultiheadAttention(
-            embed_dim, num_heads, batch_first=True
-        )
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, region_tokens: torch.Tensor) -> torch.Tensor:
@@ -114,6 +194,12 @@ class TactileEncoder(nn.Module):
         num_tokens: int,
         hidden_dim: int,
         num_heads: int = 8,
+        encoder_type: str = "mlp",
+        region_grids: list[tuple[int, int]] | None = None,
+        cnn_channels: int = 32,
+        cnn_pool: tuple[int, int] = (2, 2),
+        cnn_coord: bool = False,
+        cnn_coord_scale: float = 1.0,
     ):
         super().__init__()
         assert sum(region_sizes) == len(valid_idx), (
@@ -126,7 +212,26 @@ class TactileEncoder(nn.Module):
         self.register_buffer(
             "valid_idx", torch.as_tensor(valid_idx, dtype=torch.long), persistent=False
         )
-        self.per_region = PerRegionTactileEncoder(region_sizes, hidden_dim, embed_dim)
+        # Per-region encoder: flat MLP (default) or 2D CNN over each region's grid.
+        # Both emit [B, num_regions, embed_dim], so the aggregator / dream path are
+        # identical regardless of choice.
+        if encoder_type == "cnn":
+            assert region_grids is not None, "encoder_type='cnn' requires region_grids"
+            assert [int(r) * int(c) for r, c in region_grids] == list(region_sizes), (
+                f"region_grids {region_grids} inconsistent with region_sizes {region_sizes}"
+            )
+            self.per_region = PerRegionTactileCNNEncoder(
+                region_grids,
+                embed_dim,
+                channels=cnn_channels,
+                pool=cnn_pool,
+                coord=cnn_coord,
+                coord_scale=cnn_coord_scale,
+            )
+        elif encoder_type == "mlp":
+            self.per_region = PerRegionTactileEncoder(region_sizes, hidden_dim, embed_dim)
+        else:
+            raise ValueError(f"unknown tactile encoder_type: {encoder_type!r}")
         self.aggregator = TactileSlotAggregator(embed_dim, num_tokens, num_heads)
 
     def select_and_normalize(self, raw: torch.Tensor) -> torch.Tensor:

@@ -169,7 +169,9 @@ offline_open_loop_eval_plots/
 /models
 /data
 
-# .md
+# wzh
 /TactileDetails.md
 /TactilePlan.md
 /ClAUDE.md
+/tests
+/tactile_representation_spec.md
