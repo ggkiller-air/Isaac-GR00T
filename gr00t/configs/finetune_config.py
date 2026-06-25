@@ -15,6 +15,7 @@
 
 # Finetune config used for single node post-training.
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass
@@ -57,26 +58,29 @@ class FinetuneConfig:
     tune_diffusion_model: bool = True
     """If True, fine-tune the diffusion-based action decoder (if present in the model)."""
 
-    use_tactile: bool = False
-    """If True, enable the tactile (skin-suit) encoder + touch-dreaming graft (HTD).
-    Requires the embodiment's modality config to declare a `tactile` modality
-    (e.g. unitree_g1_sonic). Adds tactile tokens to the action-head sequence and a
-    touch-dreaming auxiliary loss. Default False keeps the model unchanged."""
+    use_tactile: Literal["dream", "input", "notac"] = "notac"
+    """Tactile (skin-suit) mode. Requires the embodiment to declare a `tactile`
+    modality (e.g. unitree_g1_sonic) for "dream"/"input".
+      - "notac" (default): tactile disabled entirely (byte-for-byte the original
+        N1.7). Default so ordinary non-tactile fine-tunes are unaffected.
+      - "dream": full HTD graft -- the encoder injects tactile tokens into the
+        action-head sequence AND a touch-dreaming auxiliary loss (EMA target encoder
+        + dream head) is trained.
+      - "input": ablation control group -- tactile is encoded and injected as a plain
+        input only; no dream head / EMA teacher / auxiliary loss."""
 
     tune_tactile: bool = True
-    """If True (and use_tactile), train the tactile encoder / aggregator / dream head.
-    Set False to freeze them (e.g. to first warm up other modules)."""
+    """If True (and use_tactile != "notac"), train the tactile encoder / aggregator /
+    dream head. Set False to freeze them (e.g. to first warm up other modules)."""
 
-    tactile_encoder_type: str = "mlp"
-    """Per-region tactile encoder (only when use_tactile). "mlp" (default) runs a
-    flat per-region MLP; "cnn" runs a per-region 2D conv over each region's
-    (rows, cols) sensel grid -> adaptive pool -> MLP fuse. Switching requires
-    retraining (new params); "mlp" keeps prior runs byte-for-byte unchanged."""
-
-    tactile_cnn_coord: bool = False
-    """If True (and tactile_encoder_type == "cnn"), add CoordConv row/col position
-    channels so the pooled CNN can encode where in a region a contact lands.
-    No effect on the mlp encoder."""
+    tactile_encoder_type: Literal["mlp", "cnn", "coord"] = "mlp"
+    """Per-region tactile encoder (only when use_tactile != "notac").
+      - "mlp" (default): flat per-region MLP.
+      - "cnn": per-region 2D conv over each region's (rows, cols) sensel grid ->
+        adaptive pool -> MLP fuse.
+      - "coord": "cnn" plus CoordConv row/col position channels, so the pooled CNN
+        can encode where in a region a contact lands.
+    Switching requires retraining (new params); "mlp" keeps prior runs unchanged."""
 
     state_dropout_prob: float = 0.2
     """

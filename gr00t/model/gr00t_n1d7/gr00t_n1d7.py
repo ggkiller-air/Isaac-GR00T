@@ -151,14 +151,19 @@ class Gr00tN1d7ActionHead(nn.Module):
                 cnn_coord=getattr(config, "tactile_cnn_coord", False),
                 cnn_coord_scale=getattr(config, "tactile_cnn_coord_scale", 1.0),
             )
-            # Frozen EMA target encoder producing touch-dreaming latent targets.
-            self.tactile_target_encoder = build_ema_teacher(self.tactile_encoder)
-            self.tactile_dream_head = TactileDreamHead(
-                in_dim=self.hidden_size,
-                latent_dim=self.input_embedding_dim,
-                dream_horizon=config.dream_horizon,
-                hidden_dim=config.tactile_hidden_dim,
-            )
+            # Touch-dreaming graft (EMA target encoder + dream head + L_tact). Gated
+            # by `use_tactile_dream`: False = ablation control group where tactile is
+            # injected into sa_embs as a plain input only, with no dream modules built.
+            self.use_tactile_dream = getattr(config, "use_tactile_dream", True)
+            if self.use_tactile_dream:
+                # Frozen EMA target encoder producing touch-dreaming latent targets.
+                self.tactile_target_encoder = build_ema_teacher(self.tactile_encoder)
+                self.tactile_dream_head = TactileDreamHead(
+                    in_dim=self.hidden_size,
+                    latent_dim=self.input_embedding_dim,
+                    dream_horizon=config.dream_horizon,
+                    hidden_dim=config.tactile_hidden_dim,
+                )
 
         self.set_trainable_parameters(
             config.tune_projector,
@@ -192,11 +197,13 @@ class Gr00tN1d7ActionHead(nn.Module):
             self.vlln.requires_grad_(False)
             self.vl_self_attention.requires_grad_(False)
         if getattr(self, "use_tactile", False):
-            # The EMA target encoder is updated by ema_update, never by gradients.
-            self.tactile_target_encoder.requires_grad_(False)
+            if getattr(self, "use_tactile_dream", False):
+                # The EMA target encoder is updated by ema_update, never by gradients.
+                self.tactile_target_encoder.requires_grad_(False)
             if not tune_tactile:
                 self.tactile_encoder.requires_grad_(False)
-                self.tactile_dream_head.requires_grad_(False)
+                if getattr(self, "use_tactile_dream", False):
+                    self.tactile_dream_head.requires_grad_(False)
         logger.debug(f"Tune action head projector: {self.tune_projector}")
         logger.debug(f"Tune action head diffusion model: {self.tune_diffusion_model}")
         logger.debug(f"Tune action head vlln: {self.tune_vlln}")
@@ -228,10 +235,12 @@ class Gr00tN1d7ActionHead(nn.Module):
                 self.vl_self_attention.eval()
             if getattr(self, "use_tactile", False):
                 # EMA target encoder is always in eval; student only if frozen.
-                self.tactile_target_encoder.eval()
+                if getattr(self, "use_tactile_dream", False):
+                    self.tactile_target_encoder.eval()
                 if not getattr(self, "tune_tactile", True):
                     self.tactile_encoder.eval()
-                    self.tactile_dream_head.eval()
+                    if getattr(self, "use_tactile_dream", False):
+                        self.tactile_dream_head.eval()
 
     def _tactile_features(
         self, action_input: BatchFeature, batch_size: int, device
@@ -382,7 +391,7 @@ class Gr00tN1d7ActionHead(nn.Module):
         # future tactile latent encoded by the slow EMA target encoder (HTD Eq. 8/9).
         # This is the component the paper finds gives a stable gain; the encoder
         # alone (tactile as plain input) is unreliable. Training-only.
-        if self.use_tactile:
+        if self.use_tactile and self.use_tactile_dream:
             tactile_raw = getattr(action_input, "tactile", None)
             if (
                 tactile_raw is not None

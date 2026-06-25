@@ -130,6 +130,28 @@ def test_use_tactile_false_has_no_tactile_modules():
     assert torch.isfinite(out["loss"])
 
 
+def test_tactile_no_dream_control_group():
+    # Ablation control: tactile encoded + injected into sa_embs as a plain input,
+    # but no dream head / EMA teacher / auxiliary loss.
+    cfg = _tiny_config(use_tactile=True, use_tactile_dream=False)
+    head = Gr00tN1d7ActionHead(cfg).float().train()
+
+    # Dream-only modules must not exist; the encoder still does.
+    assert hasattr(head, "tactile_encoder")
+    assert not hasattr(head, "tactile_dream_head")
+    assert not hasattr(head, "tactile_target_encoder")
+
+    out = head(_backbone_output(cfg), _action_input(cfg))
+    assert "tactile_loss" not in out
+    assert torch.isfinite(out["loss"])
+
+    out["loss"].backward()
+    enc_grad = sum(
+        float(p.grad.abs().sum()) for p in head.tactile_encoder.parameters() if p.grad is not None
+    )
+    assert enc_grad > 0  # tactile still flows into the action loss as an input
+
+
 def test_inference_runs_with_tactile():
     cfg = _tiny_config(use_tactile=True)
     head = Gr00tN1d7ActionHead(cfg).float().eval()

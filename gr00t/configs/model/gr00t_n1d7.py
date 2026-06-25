@@ -192,6 +192,11 @@ class Gr00tN1d7Config(PretrainedConfig):
     lambda_tactile: float = 0.5  # weight of touch-dreaming loss in total loss
     tactile_dream_beta: float = 1.0  # magnitude-term weight in touch-dreaming loss (anti-collapse)
     tune_tactile: bool = True  # train the tactile encoder / aggregator / dream head
+    # Touch-dreaming master switch (only matters when use_tactile). True (default)
+    # = full HTD graft (EMA teacher + dream head + L_tact aux loss). False = ablation
+    # control: tactile is encoded and injected into sa_embs as a plain input only,
+    # no dream head / EMA teacher / auxiliary loss is built or run.
+    use_tactile_dream: bool = True
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
