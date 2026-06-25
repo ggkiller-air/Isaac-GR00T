@@ -22,11 +22,11 @@ tactile encoder + dream head (but never the EMA target encoder), and the
 ``use_tactile=False`` path is byte-for-byte the original behavior.
 """
 
+from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
+from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7ActionHead
 import torch
 from transformers.feature_extraction_utils import BatchFeature
 
-from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
-from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7ActionHead
 
 B = 2
 LVL = 7  # backbone (vision+language) sequence length
@@ -152,6 +152,61 @@ def test_tactile_no_dream_control_group():
     assert enc_grad > 0  # tactile still flows into the action loss as an input
 
 
+def _windowed_state_input(cfg):
+    """Training input whose state carries the future window the JEPA target needs:
+    [B, state_history_length + dream_horizon, max_state_dim]."""
+    ai = _action_input(cfg)
+    ai["state"] = torch.randn(B, cfg.state_history_length + cfg.dream_horizon, cfg.max_state_dim)
+    return ai
+
+
+def test_dream_state_backprops_and_target_frozen():
+    cfg = _tiny_config(use_tactile=True, dream_state=True, lambda_state=0.5)
+    head = Gr00tN1d7ActionHead(cfg).float().train()
+
+    # State EMA target encoder is frozen at construction.
+    assert all(not p.requires_grad for p in head.state_target_encoder.parameters())
+
+    out = head(_backbone_output(cfg), _windowed_state_input(cfg))
+    assert "tactile_loss" in out and "state_jepa_loss" in out
+    assert torch.isfinite(out["loss"]) and torch.isfinite(out["state_jepa_loss"])
+
+    out["loss"].backward()
+    state_head_grad = sum(
+        float(p.grad.abs().sum()) for p in head.state_dream_head.parameters() if p.grad is not None
+    )
+    # Predictor learns; the post-DiT trunk path (tactile encoder) gets shaped too.
+    enc_grad = sum(
+        float(p.grad.abs().sum()) for p in head.tactile_encoder.parameters() if p.grad is not None
+    )
+    target_grads = [p.grad for p in head.state_target_encoder.parameters() if p.grad is not None]
+    assert state_head_grad > 0
+    assert enc_grad > 0
+    assert len(target_grads) == 0  # EMA state target never gets gradients
+
+
+def test_dream_state_missing_window_raises():
+    cfg = _tiny_config(use_tactile=True, dream_state=True)
+    head = Gr00tN1d7ActionHead(cfg).float().train()
+    # Single-frame state (no future window) must surface a clear misconfig error.
+    try:
+        head(_backbone_output(cfg), _action_input(cfg))
+    except ValueError as e:
+        assert "future state window" in str(e)
+    else:
+        raise AssertionError("expected ValueError when dream_state has no state window")
+
+
+def test_dream_state_inference_isolated():
+    # dream_state=True but inference uses single-frame state and never runs the
+    # JEPA heads / EMA updates; action output shape is unchanged.
+    cfg = _tiny_config(use_tactile=True, dream_state=True)
+    head = Gr00tN1d7ActionHead(cfg).float().eval()
+    out = head.get_action(_backbone_output(cfg), _action_input(cfg, with_action=False))
+    assert out["action_pred"].shape == (B, cfg.action_horizon, cfg.max_action_dim)
+    assert torch.isfinite(out["action_pred"]).all()
+
+
 def test_inference_runs_with_tactile():
     cfg = _tiny_config(use_tactile=True)
     head = Gr00tN1d7ActionHead(cfg).float().eval()
@@ -171,3 +226,81 @@ def test_inference_tactile_zero_fallback():
         _backbone_output(cfg), _action_input(cfg, with_tactile=False, with_action=False)
     )
     assert out["action_pred"].shape == (B, cfg.action_horizon, cfg.max_action_dim)
+
+
+def _vision_input(cfg, requires_grad=False):
+    """Training input plus the future-vision target the top-level forward would inject:
+    [B, vision_horizon, backbone_embedding_dim] (= the frozen vision tower's output)."""
+    ai = _action_input(cfg)
+    ai["vision_target"] = torch.randn(
+        B, cfg.vision_horizon, cfg.backbone_embedding_dim, requires_grad=requires_grad
+    )
+    return ai
+
+
+def test_dream_vision_backprops_and_target_frozen():
+    cfg = _tiny_config(use_tactile=True, dream_vision=True, lambda_vision=0.5)
+    head = Gr00tN1d7ActionHead(cfg).float().train()
+
+    # The vision teacher is the frozen backbone tower, not an EMA copy in the head.
+    assert hasattr(head, "vision_dream_head")
+    assert not hasattr(head, "vision_target_encoder")
+
+    ai = _vision_input(cfg, requires_grad=True)
+    out = head(_backbone_output(cfg), ai)
+    assert "tactile_loss" in out and "vision_jepa_loss" in out
+    assert torch.isfinite(out["loss"]) and torch.isfinite(out["vision_jepa_loss"])
+
+    out["loss"].backward()
+    vision_head_grad = sum(
+        float(p.grad.abs().sum()) for p in head.vision_dream_head.parameters() if p.grad is not None
+    )
+    enc_grad = sum(
+        float(p.grad.abs().sum()) for p in head.tactile_encoder.parameters() if p.grad is not None
+    )
+    assert vision_head_grad > 0  # predictor learns
+    assert enc_grad > 0  # post-DiT trunk shapes the tactile encoder too
+    assert ai["vision_target"].grad is None  # target is detached -> a frozen teacher
+
+
+def test_dream_vision_missing_target_raises():
+    cfg = _tiny_config(use_tactile=True, dream_vision=True)
+    head = Gr00tN1d7ActionHead(cfg).float().train()
+    # No vision_target (top-level forward did not produce future_pixel_values) -> clear error.
+    try:
+        head(_backbone_output(cfg), _action_input(cfg))
+    except ValueError as e:
+        assert "vision_target" in str(e)
+    else:
+        raise AssertionError("expected ValueError when dream_vision has no vision_target")
+
+
+def test_dream_vision_inference_isolated():
+    # dream_vision=True but inference never runs the dream block / needs no vision
+    # target; action output shape is unchanged.
+    cfg = _tiny_config(use_tactile=True, dream_vision=True)
+    head = Gr00tN1d7ActionHead(cfg).float().eval()
+    out = head.get_action(_backbone_output(cfg), _action_input(cfg, with_action=False))
+    assert out["action_pred"].shape == (B, cfg.action_horizon, cfg.max_action_dim)
+    assert torch.isfinite(out["action_pred"]).all()
+
+
+def test_dream_state_and_vision_compose():
+    # Both JEPA branches enabled at once: independent heads + losses, both backprop.
+    cfg = _tiny_config(use_tactile=True, dream_state=True, dream_vision=True)
+    head = Gr00tN1d7ActionHead(cfg).float().train()
+
+    ai = _windowed_state_input(cfg)
+    ai["vision_target"] = torch.randn(B, cfg.vision_horizon, cfg.backbone_embedding_dim)
+    out = head(_backbone_output(cfg), ai)
+    assert {"tactile_loss", "state_jepa_loss", "vision_jepa_loss"} <= set(out)
+    assert torch.isfinite(out["loss"])
+
+    out["loss"].backward()
+    state_grad = sum(
+        float(p.grad.abs().sum()) for p in head.state_dream_head.parameters() if p.grad is not None
+    )
+    vision_grad = sum(
+        float(p.grad.abs().sum()) for p in head.vision_dream_head.parameters() if p.grad is not None
+    )
+    assert state_grad > 0 and vision_grad > 0

@@ -93,6 +93,24 @@ class FinetuneConfig:
     lambda_state: float = 0.5
     """Weight of the state-JEPA loss in the total loss (used only when dream_state)."""
 
+    dream_vision: bool = False
+    """Vision-JEPA branch (only meaningful with use_tactile="dream"). When True, the
+    post-DiT tactile trunk additionally predicts the future *vision* latent against a
+    frozen target: the backbone vision tower (`backbone.model.visual`) run over the
+    future frames (no EMA -- it is already a fixed pretrained teacher). Adds
+    lambda_vision * L_vision to the loss. Widens the video modality's delta_indices to
+    range(vision_horizon+1) at launch (only for vision runs, so other runs pay no extra
+    video IO). Training-only; inference and action output format are unchanged."""
+
+    lambda_vision: float = 0.5
+    """Weight of the vision-JEPA loss in the total loss (used only when dream_vision)."""
+
+    vision_horizon: int = 4
+    """Number of future frames the vision-JEPA branch predicts (target shape
+    [B, vision_horizon, backbone_embedding_dim]). Each costs one frozen-ViT image
+    encode and one extra decoded video frame per camera; lower it if dataloader IO or
+    VRAM is tight."""
+
     state_dropout_prob: float = 0.2
     """
     Dropout probability applied to state inputs for regularization during training.

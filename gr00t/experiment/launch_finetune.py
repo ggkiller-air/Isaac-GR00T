@@ -93,6 +93,24 @@ if __name__ == "__main__":
             "[launch_finetune] WARNING: dream_state=True ignored because use_tactile != 'dream' "
             "(state-JEPA needs the touch-dreaming trunk)."
         )
+    # Vision-JEPA also rides the post-DiT tactile trunk -> only in "dream" mode.
+    config.model.dream_vision = ft_config.dream_vision and ft_config.use_tactile == "dream"
+    config.model.lambda_vision = ft_config.lambda_vision
+    config.model.vision_horizon = ft_config.vision_horizon
+    if ft_config.dream_vision and ft_config.use_tactile != "dream":
+        print(
+            "[launch_finetune] WARNING: dream_vision=True ignored because use_tactile != 'dream' "
+            "(vision-JEPA needs the touch-dreaming trunk)."
+        )
+    # Widen the video window so the dataset loads the future frames the vision target
+    # needs -- but ONLY for vision runs, so ordinary runs keep single-frame video IO.
+    # The processor (dream_vision=True) routes frames [1:] to future targets, never the
+    # prompt, so the policy conditioning is byte-identical to a single-frame run.
+    if config.model.dream_vision:
+        vh = config.model.vision_horizon
+        for tag_cfg in config.data.modality_configs.values():
+            if "video" in tag_cfg:
+                tag_cfg["video"].delta_indices = list(range(vh + 1))
     # "coord" == cnn encoder with CoordConv channels enabled.
     _tactile_enc = {"mlp": ("mlp", False), "cnn": ("cnn", False), "coord": ("cnn", True)}
     config.model.tactile_encoder_type, config.model.tactile_cnn_coord = _tactile_enc[

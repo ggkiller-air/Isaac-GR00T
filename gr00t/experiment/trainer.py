@@ -345,6 +345,11 @@ class Gr00tTrainer(Trainer):
                 component_logs["state_jepa_loss"] = (
                     self._nested_gather(state_jepa_scalar).mean().item()
                 )
+            if outputs.get("vision_jepa_loss") is not None:
+                vision_jepa_scalar = outputs["vision_jepa_loss"].detach().to(loss.device)
+                component_logs["vision_jepa_loss"] = (
+                    self._nested_gather(vision_jepa_scalar).mean().item()
+                )
             if self.args.local_rank in (-1, 0) and component_logs:
                 self.log(component_logs)
 

@@ -32,6 +32,7 @@ uv run torchrun --nproc_per_node=2 --master_port=29500 \
     --dataloader-num-workers 4 \
     --use-tactile dream \ 
     --dream-state \
+     --dream-vision \
     --tactile-encoder-type mlp
 ```
 --use-tactile input \  #dream/input/notac

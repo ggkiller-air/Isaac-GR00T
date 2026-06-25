@@ -156,6 +156,7 @@ class Gr00tN1d7ActionHead(nn.Module):
             # injected into sa_embs as a plain input only, with no dream modules built.
             self.use_tactile_dream = getattr(config, "use_tactile_dream", True)
             self.dream_state = False
+            self.dream_vision = False
             if self.use_tactile_dream:
                 # Frozen EMA target encoder producing touch-dreaming latent targets.
                 self.tactile_target_encoder = build_ema_teacher(self.tactile_encoder)
@@ -182,6 +183,24 @@ class Gr00tN1d7ActionHead(nn.Module):
                         in_dim=self.hidden_size,
                         latent_dim=self.input_embedding_dim,
                         dream_horizon=config.dream_horizon,
+                        hidden_dim=config.tactile_hidden_dim,
+                    )
+
+                # JEPA vision branch: predict the future *vision* latent from the same
+                # post-DiT tactile trunk. Unlike state/tactile there is no clean+trained
+                # encoder to EMA -- the target is the FROZEN backbone vision tower run
+                # over future frames (a fixed pretrained teacher; computed in the
+                # top-level Gr00tN1d7.forward and passed in via action_input). The target
+                # width is backbone_embedding_dim (the vision merger's output). Predictor
+                # head + touch_dreaming_loss, training-only.
+                self.dream_vision = getattr(config, "dream_vision", False)
+                self.lambda_vision = getattr(config, "lambda_vision", 0.5)
+                self.vision_horizon = getattr(config, "vision_horizon", config.dream_horizon)
+                if self.dream_vision:
+                    self.vision_dream_head = TactileDreamHead(
+                        in_dim=self.hidden_size,
+                        latent_dim=config.backbone_embedding_dim,
+                        dream_horizon=self.vision_horizon,
                         hidden_dim=config.tactile_hidden_dim,
                     )
 
@@ -228,6 +247,8 @@ class Gr00tN1d7ActionHead(nn.Module):
                     self.tactile_dream_head.requires_grad_(False)
                     if getattr(self, "dream_state", False):
                         self.state_dream_head.requires_grad_(False)
+                    if getattr(self, "dream_vision", False):
+                        self.vision_dream_head.requires_grad_(False)
         logger.debug(f"Tune action head projector: {self.tune_projector}")
         logger.debug(f"Tune action head diffusion model: {self.tune_diffusion_model}")
         logger.debug(f"Tune action head vlln: {self.tune_vlln}")
@@ -269,6 +290,8 @@ class Gr00tN1d7ActionHead(nn.Module):
                         self.tactile_dream_head.eval()
                         if getattr(self, "dream_state", False):
                             self.state_dream_head.eval()
+                        if getattr(self, "dream_vision", False):
+                            self.vision_dream_head.eval()
 
     def _tactile_features(
         self, action_input: BatchFeature, batch_size: int, device
@@ -479,6 +502,32 @@ class Gr00tN1d7ActionHead(nn.Module):
                     )
                     total_loss = total_loss + self.lambda_state * state_loss
                     outputs["state_jepa_loss"] = state_loss.detach()
+
+                # --- Vision branch (JEPA): predict future frozen-ViT latents. ---
+                # The target is supplied by the top-level forward (it owns the backbone
+                # vision tower); detach + cast guard against dtype/grad leaking in.
+                if getattr(self, "dream_vision", False):
+                    vision_target = getattr(action_input, "vision_target", None)
+                    if vision_target is None:
+                        raise ValueError(
+                            "dream_vision=True but no vision_target was provided. The "
+                            "top-level forward must run the frozen vision tower over the "
+                            "future frames (widen the video modality delta_indices)."
+                        )
+                    vh = self.vision_horizon
+                    pred_vision = self.vision_dream_head(tactile_trunk)
+                    assert pred_vision.shape == (B, vh, vision_target.shape[-1]), (
+                        pred_vision.shape,
+                        vision_target.shape,
+                    )
+                    assert vision_target.shape[1] == vh, vision_target.shape
+                    vision_loss = touch_dreaming_loss(
+                        pred_vision,
+                        vision_target.detach().to(pred_vision.dtype),
+                        self.tactile_dream_beta,
+                    )
+                    total_loss = total_loss + self.lambda_vision * vision_loss
+                    outputs["vision_jepa_loss"] = vision_loss.detach()
 
                 outputs["loss"] = total_loss
 
@@ -790,6 +839,32 @@ class Gr00tN1d7(PreTrainedModel):
 
         return backbone_inputs, action_inputs
 
+    @torch.no_grad()
+    def _compute_vision_target(self, backbone_inputs: BatchFeature) -> torch.Tensor:
+        """Encode the future frames with the frozen vision tower into JEPA targets.
+
+        The collator stacks per-sample future frames sample-major, frame-outer /
+        view-inner, into ``future_pixel_values`` (+ ``future_image_grid_thw``). We run
+        the bare vision tower (no LLM), mean-pool each image's merged patch tokens, then
+        average over the views to get ``[B, vision_horizon, backbone_embedding_dim]``.
+        Frozen teacher -> no EMA, no gradient; the action head detaches again.
+        """
+        visual = self.backbone.model.visual
+        fpv = backbone_inputs["future_pixel_values"]
+        fthw = backbone_inputs["future_image_grid_thw"]
+        embeds = visual(fpv, fthw)  # [sum_merged_tokens, D_vis]
+        merge = self.backbone.model.config.vision_config.spatial_merge_size
+        counts = (fthw.prod(dim=-1) // (merge**2)).tolist()
+        pooled = torch.stack(
+            [chunk.mean(dim=0) for chunk in embeds.split(counts, dim=0)], dim=0
+        )  # [num_imgs, D_vis]
+        B = backbone_inputs["input_ids"].shape[0]
+        vh = self.config.vision_horizon
+        num_imgs = pooled.shape[0]
+        assert num_imgs % (B * vh) == 0, (num_imgs, B, vh)
+        num_views = num_imgs // (B * vh)
+        return pooled.view(B, vh, num_views, pooled.shape[-1]).mean(dim=2)  # [B, vh, D_vis]
+
     def forward(self, inputs: dict) -> BatchFeature:
         """
         Forward pass through the complete model.
@@ -804,6 +879,11 @@ class Gr00tN1d7(PreTrainedModel):
         # Prepare inputs for backbone and action head
         backbone_inputs, action_inputs = self.prepare_input(inputs)
         backbone_outputs = self.backbone(backbone_inputs)
+        # Vision-JEPA: encode the future frames with the frozen vision tower and hand
+        # the target to the action head. Training-only -- inference batches carry no
+        # future_pixel_values, so this is skipped and the action output is unchanged.
+        if getattr(self.config, "dream_vision", False) and "future_pixel_values" in backbone_inputs:
+            action_inputs["vision_target"] = self._compute_vision_target(backbone_inputs)
         action_outputs = self.action_head(backbone_outputs, action_inputs)
 
         return action_outputs

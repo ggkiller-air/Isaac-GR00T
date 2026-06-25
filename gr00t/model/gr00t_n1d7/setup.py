@@ -91,6 +91,24 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 # enabled. Defaults keep older configs byte-for-byte unchanged.
                 use_tactile=getattr(self.config.model, "use_tactile", False),
                 tune_tactile=getattr(self.config.model, "tune_tactile", True),
+                # Tactile/JEPA hyperparameters must be forwarded too: from_pretrained
+                # rebuilds the config from the (tactile-free) base checkpoint, so any
+                # field NOT passed here silently falls back to the Gr00tN1d7Config
+                # default -- which previously dropped --dream-state, --dream-vision,
+                # --tactile-encoder-type, and the lambda/horizon sweeps on every
+                # checkpoint finetune. Keep this in sync with launch_finetune.
+                use_tactile_dream=getattr(self.config.model, "use_tactile_dream", True),
+                tactile_encoder_type=getattr(self.config.model, "tactile_encoder_type", "mlp"),
+                tactile_cnn_coord=getattr(self.config.model, "tactile_cnn_coord", False),
+                dream_state=getattr(self.config.model, "dream_state", False),
+                lambda_state=getattr(self.config.model, "lambda_state", 0.5),
+                dream_vision=getattr(self.config.model, "dream_vision", False),
+                lambda_vision=getattr(self.config.model, "lambda_vision", 0.5),
+                vision_horizon=getattr(self.config.model, "vision_horizon", 4),
+                lambda_tactile=getattr(self.config.model, "lambda_tactile", 0.5),
+                dream_horizon=getattr(self.config.model, "dream_horizon", 4),
+                ema_decay=getattr(self.config.model, "ema_decay", 0.99),
+                tactile_dream_beta=getattr(self.config.model, "tactile_dream_beta", 1.0),
                 state_dropout_prob=self.config.model.state_dropout_prob,
                 backbone_trainable_params_fp32=self.config.model.backbone_trainable_params_fp32,
                 load_bf16=self.config.model.load_bf16,
@@ -186,6 +204,9 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 exclude_state=self.model_config.exclude_state,
                 state_dropout_prob=self.model_config.state_dropout_prob,
                 use_mean_std=self.model_config.use_mean_std,
+                # Vision-JEPA future-frame split
+                dream_vision=getattr(self.model_config, "dream_vision", False),
+                vision_horizon=getattr(self.model_config, "vision_horizon", 4),
                 **self.transformers_loading_kwargs,
             )
         else:
@@ -214,6 +235,9 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 exclude_state=self.model_config.exclude_state,
                 state_dropout_prob=self.model_config.state_dropout_prob,
                 use_mean_std=self.model_config.use_mean_std,
+                # Vision-JEPA future-frame split
+                dream_vision=getattr(self.model_config, "dream_vision", False),
+                vision_horizon=getattr(self.model_config, "vision_horizon", 4),
                 transformers_loading_kwargs=self.transformers_loading_kwargs,
             )
 

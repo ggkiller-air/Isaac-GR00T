@@ -207,10 +207,20 @@ class Gr00tN1d7Config(PretrainedConfig):
     # (delta_indices >= dream_horizon+1) and state_history_length == 1.
     dream_state: bool = False
     lambda_state: float = 0.5  # weight of the state-JEPA loss in total loss
-    # Vision branch: placeholder only. Building a future-vision target needs an
-    # extra frozen-backbone forward over future frames (not wired yet); keep False.
+    # Vision branch: predict the future *vision* latent from the same post-DiT
+    # tactile trunk. Unlike state/tactile there is no clean+trained encoder to EMA,
+    # so the target is the FROZEN backbone vision tower (`backbone.model.visual`)
+    # run once over the future frames -- a fixed, pretrained teacher (no EMA, no
+    # collapse source). The target dim is backbone_embedding_dim (the vision
+    # merger projects patches into the LLM hidden size). Requires the dataset's
+    # video modality to load a future window (delta_indices >= vision_horizon+1,
+    # widened conditionally at launch so non-vision runs pay no extra video IO).
+    # Training-only; inference / action output are unchanged.
     dream_vision: bool = False
-    lambda_vision: float = 0.5
+    lambda_vision: float = 0.5  # weight of the vision-JEPA loss in total loss
+    vision_horizon: int = (
+        4  # future frames predicted (target shape [B, vision_horizon, backbone_embedding_dim])
+    )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

@@ -133,6 +133,17 @@ class Gr00tN1d7DataCollator:
                 "input_ids",
             ):
                 raise Exception("Not implemented")
+            elif key == "future_images":
+                # Vision-JEPA future-frame targets: each sample contributes a list of
+                # PIL frames (sample-major; frame-outer/view-inner within a sample).
+                # Concatenate and run the bare image processor -- these never enter the
+                # prompt / input_ids, so the policy conditioning is unchanged.
+                future_imgs = []
+                for v in values:
+                    future_imgs += v
+                feat = self.processor.image_processor(images=future_imgs, return_tensors="pt")
+                batch["future_pixel_values"] = feat["pixel_values"]
+                batch["future_image_grid_thw"] = feat["image_grid_thw"]
             else:
                 # state, state_mask, action and action_mask - stack to form batch dimension
                 batch[key] = torch.from_numpy(np.stack(values))
@@ -172,6 +183,12 @@ class Gr00tN1d7Processor(BaseProcessor):
         # State augmentation
         exclude_state: bool = False,
         state_dropout_prob: float = 0.0,
+        # Vision-JEPA: when True (training), split the loaded video window so the
+        # current frame feeds the VLM prompt as usual while the next vision_horizon
+        # frames are emitted as `future_images` (frozen-ViT targets), never entering
+        # input_ids. No-op at inference and when the video window is a single frame.
+        dream_vision: bool = False,
+        vision_horizon: int = 4,
         # Normalization
         use_mean_std: bool = False,
         # Backward-compat params (stored but not actively used)
@@ -200,6 +217,10 @@ class Gr00tN1d7Processor(BaseProcessor):
         # State augmentation settings
         self.exclude_state = exclude_state
         self.state_dropout_prob = state_dropout_prob
+
+        # Vision-JEPA future-frame split settings
+        self.dream_vision = dream_vision
+        self.vision_horizon = vision_horizon
 
         self.letter_box_transform = letter_box_transform
 
@@ -654,9 +675,9 @@ class Gr00tN1d7Processor(BaseProcessor):
             tactile_arr = np.concatenate(
                 [content.tactile[key] for key in tactile_cfg.modality_keys], axis=-1
             )
-            transformed_inputs["tactile"] = torch.from_numpy(
-                np.ascontiguousarray(tactile_arr)
-            ).to(torch.float32)
+            transformed_inputs["tactile"] = torch.from_numpy(np.ascontiguousarray(tactile_arr)).to(
+                torch.float32
+            )
 
         return transformed_inputs
 
@@ -697,6 +718,22 @@ class Gr00tN1d7Processor(BaseProcessor):
                     [image_transform(img) for img in images[view]]
                 )  # (T, C, H, W)
 
+        # Vision-JEPA split (training only): keep the current frame (index 0) for the
+        # VLM prompt -- so the policy input is byte-identical to a single-frame run --
+        # and peel off the next vision_horizon frames as frozen-ViT prediction targets.
+        # Gated on having a widened window (T > 1); single-frame runs are untouched.
+        split_future = (
+            self.dream_vision
+            and self.training
+            and all(v.shape[0] > 1 for v in temporal_stacked_images.values())
+        )
+        future_per_view = {}
+        if split_future:
+            for view in image_keys:
+                full = temporal_stacked_images[view]  # (T, C, H, W)
+                future_per_view[view] = full[1 : 1 + self.vision_horizon]
+                temporal_stacked_images[view] = full[:1]
+
         for k, v in temporal_stacked_images.items():
             assert isinstance(k, str), f"{k} is not a string"
             assert isinstance(v, torch.Tensor), f"{v} is not a torch tensor"
@@ -711,6 +748,17 @@ class Gr00tN1d7Processor(BaseProcessor):
         )  # (T*V, C, H, W), processor expects numpy array
 
         vlm_inputs = self._apply_vlm_processing(stacked_images, language)
+
+        if split_future:
+            # Order: frame outer, view inner -> the model reshapes the collated batch
+            # to [B, vision_horizon, V, D] and means over V. Every view must supply
+            # the full horizon (datasets pad short episodes), so this is rectangular.
+            future_pils = []
+            for h in range(self.vision_horizon):
+                for view in image_keys:
+                    arr = future_per_view[view][h].numpy()  # (C, H, W) uint8
+                    future_pils.append(Image.fromarray(np.transpose(arr, (1, 2, 0))))
+            vlm_inputs["future_images"] = future_pils
         return vlm_inputs
 
     def save_pretrained(self, save_directory: str | Path) -> list[Path]:
@@ -750,6 +798,9 @@ class Gr00tN1d7Processor(BaseProcessor):
                 # State augmentation
                 "exclude_state": self.exclude_state,
                 "state_dropout_prob": self.state_dropout_prob,
+                # Vision-JEPA future-frame split
+                "dream_vision": self.dream_vision,
+                "vision_horizon": self.vision_horizon,
             },
         }
         with open(main_config_file, "w") as f:
@@ -839,6 +890,8 @@ class Gr00tN1d7Processor(BaseProcessor):
                 "max_action_horizon",
                 "max_state_dim",
                 "max_action_dim",
+                "dream_vision",
+                "vision_horizon",
             ]
             for key in override_keys:
                 if key in kwargs:

@@ -1,0 +1,16 @@
+=== log -2 ===
+2747918 dream state
+f55b527 0625 optimize cli command and do the pi05 bridge communication
+=== status ===
+M  gr00t/configs/finetune_config.py
+M  gr00t/configs/model/gr00t_n1d7.py
+M  gr00t/experiment/launch_finetune.py
+M  gr00t/experiment/trainer.py
+M  gr00t/model/gr00t_n1d7/gr00t_n1d7.py
+M  gr00t/model/gr00t_n1d7/processing_gr00t_n1d7.py
+M  gr00t/model/gr00t_n1d7/setup.py
+M  tests/test_tactile_action_head.py
+ M tutorial.md
+?? .gitcheck.txt
+=== branch ===
+JEPA
