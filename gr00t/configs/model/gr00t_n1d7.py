@@ -197,6 +197,20 @@ class Gr00tN1d7Config(PretrainedConfig):
     # control: tactile is encoded and injected into sa_embs as a plain input only,
     # no dream head / EMA teacher / auxiliary loss is built or run.
     use_tactile_dream: bool = True
+    # --- Tactile JEPA: predict future *other-modality* latents from the post-DiT
+    # tactile trunk (shares the HTD dream machinery: EMA target encoder + a
+    # TactileDreamHead-shaped predictor + touch_dreaming_loss). All branches are
+    # training-only and gated on use_tactile + use_tactile_dream (the trunk comes
+    # from the post-DiT tactile tokens). Absolute (non-delta) targets, per design.
+    # State branch: EMA(state_encoder) encodes the future state window into the
+    # target; requires the dataset's state modality to load a future window
+    # (delta_indices >= dream_horizon+1) and state_history_length == 1.
+    dream_state: bool = False
+    lambda_state: float = 0.5  # weight of the state-JEPA loss in total loss
+    # Vision branch: placeholder only. Building a future-vision target needs an
+    # extra frozen-backbone forward over future frames (not wired yet); keep False.
+    dream_vision: bool = False
+    lambda_vision: float = 0.5
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

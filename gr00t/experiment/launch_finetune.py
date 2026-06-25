@@ -84,6 +84,15 @@ if __name__ == "__main__":
     _tactile_mode = {"notac": (False, False), "input": (True, False), "dream": (True, True)}
     config.model.use_tactile, config.model.use_tactile_dream = _tactile_mode[ft_config.use_tactile]
     config.model.tune_tactile = ft_config.tune_tactile
+    # State-JEPA branch rides on the touch-dreaming trunk, so it only applies in
+    # "dream" mode. Silently ignore (with a warning) otherwise to avoid a no-op build.
+    config.model.dream_state = ft_config.dream_state and ft_config.use_tactile == "dream"
+    config.model.lambda_state = ft_config.lambda_state
+    if ft_config.dream_state and ft_config.use_tactile != "dream":
+        print(
+            "[launch_finetune] WARNING: dream_state=True ignored because use_tactile != 'dream' "
+            "(state-JEPA needs the touch-dreaming trunk)."
+        )
     # "coord" == cnn encoder with CoordConv channels enabled.
     _tactile_enc = {"mlp": ("mlp", False), "cnn": ("cnn", False), "coord": ("cnn", True)}
     config.model.tactile_encoder_type, config.model.tactile_cnn_coord = _tactile_enc[

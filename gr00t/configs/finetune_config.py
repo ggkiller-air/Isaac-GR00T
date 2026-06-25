@@ -82,6 +82,17 @@ class FinetuneConfig:
         can encode where in a region a contact lands.
     Switching requires retraining (new params); "mlp" keeps prior runs unchanged."""
 
+    dream_state: bool = False
+    """State-JEPA branch (only meaningful with use_tactile="dream"). When True, the
+    post-DiT tactile trunk additionally predicts the future *state* latent against an
+    EMA(state_encoder) target, adding lambda_state * L_state to the loss. Requires the
+    dataset state modality to load a future window (delta_indices >= dream_horizon+1;
+    already set for unitree_g1_sonic) and state_history_length == 1. Training-only;
+    inference and action output format are unchanged."""
+
+    lambda_state: float = 0.5
+    """Weight of the state-JEPA loss in the total loss (used only when dream_state)."""
+
     state_dropout_prob: float = 0.2
     """
     Dropout probability applied to state inputs for regularization during training.

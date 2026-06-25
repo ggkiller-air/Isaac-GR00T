@@ -69,12 +69,18 @@ MODALITY_CONFIGS = {
             delta_indices=[0],
             modality_keys=["ego_view_left", "ego_view_right"],
         ),
-        "tactile" : ModalityConfig(
+        "tactile": ModalityConfig(
             delta_indices=list(range(5)),
             modality_keys=["tactile_raw"],
         ),
         "state": ModalityConfig(
-            delta_indices=[0],
+            # current frame + future window for the state-JEPA target (dream_state).
+            # range(N) must be >= model dream_horizon + 1; the action head consumes
+            # only frame 0 in the main path and slices [1:1+tau] as the JEPA target.
+            # Harmless (extra IO only) when dream_state is off. unitree_g1_sonic uses
+            # absolute actions, so widening state does NOT trip the relative-stats
+            # assert in RelativeActionLoader (it never runs for absolute keys).
+            delta_indices=list(range(5)),
             modality_keys=[
                 "left_leg",
                 "right_leg",

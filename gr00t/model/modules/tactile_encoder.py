@@ -309,8 +309,12 @@ def ema_update(teacher: nn.Module, student: nn.Module, decay: float) -> None:
         ema_buf.copy_(buf)
 
 
-def build_ema_teacher(student: TactileEncoder) -> TactileEncoder:
-    """Clone ``student`` into a frozen EMA target encoder initialized from it."""
+def build_ema_teacher(student: nn.Module) -> nn.Module:
+    """Clone ``student`` into a frozen EMA target encoder initialized from it.
+
+    Works for any ``nn.Module`` (tactile encoder for touch-dreaming, state encoder
+    for the state-JEPA branch); the EMA is driven externally by ``ema_update``.
+    """
     teacher = copy.deepcopy(student)
     for param in teacher.parameters():
         param.requires_grad_(False)

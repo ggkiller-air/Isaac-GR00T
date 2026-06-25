@@ -155,6 +155,7 @@ class Gr00tN1d7ActionHead(nn.Module):
             # by `use_tactile_dream`: False = ablation control group where tactile is
             # injected into sa_embs as a plain input only, with no dream modules built.
             self.use_tactile_dream = getattr(config, "use_tactile_dream", True)
+            self.dream_state = False
             if self.use_tactile_dream:
                 # Frozen EMA target encoder producing touch-dreaming latent targets.
                 self.tactile_target_encoder = build_ema_teacher(self.tactile_encoder)
@@ -164,6 +165,25 @@ class Gr00tN1d7ActionHead(nn.Module):
                     dream_horizon=config.dream_horizon,
                     hidden_dim=config.tactile_hidden_dim,
                 )
+                # JEPA state branch: predict the future state latent from the same
+                # post-DiT tactile trunk. Target = EMA(state_encoder) over the future
+                # state window (which the dataset supplies by widening the state
+                # modality's delta_indices). Reuses the TactileDreamHead predictor
+                # shape and touch_dreaming_loss (cosine + magnitude, anti-collapse).
+                self.dream_state = getattr(config, "dream_state", False)
+                self.lambda_state = getattr(config, "lambda_state", 0.5)
+                if self.dream_state:
+                    assert config.state_history_length == 1, (
+                        "dream_state requires state_history_length == 1 so a single future "
+                        "state frame matches the state encoder input width."
+                    )
+                    self.state_target_encoder = build_ema_teacher(self.state_encoder)
+                    self.state_dream_head = TactileDreamHead(
+                        in_dim=self.hidden_size,
+                        latent_dim=self.input_embedding_dim,
+                        dream_horizon=config.dream_horizon,
+                        hidden_dim=config.tactile_hidden_dim,
+                    )
 
         self.set_trainable_parameters(
             config.tune_projector,
@@ -198,12 +218,16 @@ class Gr00tN1d7ActionHead(nn.Module):
             self.vl_self_attention.requires_grad_(False)
         if getattr(self, "use_tactile", False):
             if getattr(self, "use_tactile_dream", False):
-                # The EMA target encoder is updated by ema_update, never by gradients.
+                # The EMA target encoders are updated by ema_update, never by gradients.
                 self.tactile_target_encoder.requires_grad_(False)
+                if getattr(self, "dream_state", False):
+                    self.state_target_encoder.requires_grad_(False)
             if not tune_tactile:
                 self.tactile_encoder.requires_grad_(False)
                 if getattr(self, "use_tactile_dream", False):
                     self.tactile_dream_head.requires_grad_(False)
+                    if getattr(self, "dream_state", False):
+                        self.state_dream_head.requires_grad_(False)
         logger.debug(f"Tune action head projector: {self.tune_projector}")
         logger.debug(f"Tune action head diffusion model: {self.tune_diffusion_model}")
         logger.debug(f"Tune action head vlln: {self.tune_vlln}")
@@ -234,13 +258,17 @@ class Gr00tN1d7ActionHead(nn.Module):
                 self.vlln.eval()
                 self.vl_self_attention.eval()
             if getattr(self, "use_tactile", False):
-                # EMA target encoder is always in eval; student only if frozen.
+                # EMA target encoders are always in eval; students only if frozen.
                 if getattr(self, "use_tactile_dream", False):
                     self.tactile_target_encoder.eval()
+                    if getattr(self, "dream_state", False):
+                        self.state_target_encoder.eval()
                 if not getattr(self, "tune_tactile", True):
                     self.tactile_encoder.eval()
                     if getattr(self, "use_tactile_dream", False):
                         self.tactile_dream_head.eval()
+                        if getattr(self, "dream_state", False):
+                            self.state_dream_head.eval()
 
     def _tactile_features(
         self, action_input: BatchFeature, batch_size: int, device
@@ -305,12 +333,27 @@ class Gr00tN1d7ActionHead(nn.Module):
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
 
-        # Handle state history
-        assert action_input.state.shape[1] == self.config.state_history_length
-        action_input.state = action_input.state.view(action_input.state.shape[0], 1, -1)
+        # Handle state. When state-JEPA is enabled the dataset widens the state
+        # modality so the incoming tensor is [B, state_history_length + future_tau, D];
+        # the main path consumes only the first state_history_length frame(s), and the
+        # future frames (when present) are captured for the state-JEPA target below.
+        shl = self.config.state_history_length
+        state_seq = action_input.state
+        assert state_seq.shape[1] >= shl, (
+            f"state has {state_seq.shape[1]} frames, need >= state_history_length={shl}"
+        )
+        state_current = state_seq[:, :shl].reshape(state_seq.shape[0], 1, -1)
+        state_future = None
+        if (
+            self.use_tactile
+            and getattr(self, "use_tactile_dream", False)
+            and getattr(self, "dream_state", False)
+            and state_seq.shape[1] >= shl + self.dream_horizon
+        ):
+            state_future = state_seq[:, shl : shl + self.dream_horizon]  # [B, tau, D]
 
         # Embed state.
-        state_features = self.state_encoder(action_input.state, embodiment_id)
+        state_features = self.state_encoder(state_current, embodiment_id)
 
         # Dropout state features (training only): zero out dropped states.
         if self.training and self.state_dropout_prob > 0:
@@ -398,19 +441,46 @@ class Gr00tN1d7ActionHead(nn.Module):
                 and tactile_raw.dim() == 3
                 and tactile_raw.shape[1] >= self.dream_horizon + 1
             ):
-                # Slow-moving EMA update of the target encoder (no gradient).
+                # Shared post-DiT tactile trunk: pooled over the tactile token
+                # positions [1 : 1 + N]. Every JEPA predictor head reads this.
+                tactile_trunk = model_output[:, 1 : 1 + self.n_tactile_tokens].mean(dim=1)
+                total_loss = loss
+                D_emb, tau = self.input_embedding_dim, self.dream_horizon
+                B = tactile_trunk.shape[0]
+
+                # --- Tactile branch (HTD touch-dreaming): predict future tactile. ---
                 ema_update(self.tactile_target_encoder, self.tactile_encoder, self.ema_decay)
-                future_raw = tactile_raw[:, 1 : 1 + self.dream_horizon]
+                future_raw = tactile_raw[:, 1 : 1 + tau]
                 with torch.no_grad():
                     target_latent = self.tactile_target_encoder.encode_pooled(future_raw)
-                # Pool trunk features over the tactile token positions [1 : 1 + N].
-                tactile_trunk = model_output[:, 1 : 1 + self.n_tactile_tokens].mean(dim=1)
                 dream_pred = self.tactile_dream_head(tactile_trunk)
+                assert dream_pred.shape == (B, tau, D_emb), dream_pred.shape
                 tactile_loss = touch_dreaming_loss(
                     dream_pred, target_latent, self.tactile_dream_beta
                 )
-                outputs["loss"] = loss + self.lambda_tactile * tactile_loss
+                total_loss = total_loss + self.lambda_tactile * tactile_loss
                 outputs["tactile_loss"] = tactile_loss.detach()
+
+                # --- State branch (JEPA): predict future state latents. ---
+                if getattr(self, "dream_state", False):
+                    if state_future is None:
+                        raise ValueError(
+                            "dream_state=True but no future state window was loaded. Widen "
+                            "the dataset state modality delta_indices to range(dream_horizon+1)."
+                        )
+                    ema_update(self.state_target_encoder, self.state_encoder, self.ema_decay)
+                    with torch.no_grad():
+                        target_state = self.state_target_encoder(state_future, embodiment_id)
+                    pred_state = self.state_dream_head(tactile_trunk)
+                    assert pred_state.shape == (B, tau, D_emb), pred_state.shape
+                    assert target_state.shape == (B, tau, D_emb), target_state.shape
+                    state_loss = touch_dreaming_loss(
+                        pred_state, target_state.detach(), self.tactile_dream_beta
+                    )
+                    total_loss = total_loss + self.lambda_state * state_loss
+                    outputs["state_jepa_loss"] = state_loss.detach()
+
+                outputs["loss"] = total_loss
 
         return outputs
 

@@ -335,13 +335,16 @@ class Gr00tTrainer(Trainer):
             component_logs = {}
             if "action_loss" in outputs and "action_mask" in outputs:
                 action_mask = outputs["action_mask"]
-                action_scalar = (
-                    outputs["action_loss"].sum() / (action_mask.sum() + 1e-6)
-                ).detach()
+                action_scalar = (outputs["action_loss"].sum() / (action_mask.sum() + 1e-6)).detach()
                 component_logs["action_loss"] = self._nested_gather(action_scalar).mean().item()
             if outputs.get("tactile_loss") is not None:
                 tactile_scalar = outputs["tactile_loss"].detach().to(loss.device)
                 component_logs["tactile_loss"] = self._nested_gather(tactile_scalar).mean().item()
+            if outputs.get("state_jepa_loss") is not None:
+                state_jepa_scalar = outputs["state_jepa_loss"].detach().to(loss.device)
+                component_logs["state_jepa_loss"] = (
+                    self._nested_gather(state_jepa_scalar).mean().item()
+                )
             if self.args.local_rank in (-1, 0) and component_logs:
                 self.log(component_logs)
 
