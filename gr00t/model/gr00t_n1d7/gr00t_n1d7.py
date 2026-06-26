@@ -456,8 +456,13 @@ class Gr00tN1d7ActionHead(nn.Module):
         # Touch-dreaming auxiliary loss: from the shared trunk features, predict the
         # future tactile latent encoded by the slow EMA target encoder (HTD Eq. 8/9).
         # This is the component the paper finds gives a stable gain; the encoder
-        # alone (tactile as plain input) is unreliable. Training-only.
-        if self.use_tactile and self.use_tactile_dream:
+        # alone (tactile as plain input) is unreliable. Training-only: the EMA
+        # target encoders are stepped here, so guarding on self.training keeps
+        # eval/inference forwards from drifting the teachers (and saves compute).
+        # NOTE: ema_update fires once per forward == once per optimizer step only
+        # when gradient_accumulation_steps == 1. If accumulation is ever enabled,
+        # move the EMA step into a trainer callback fired on optimizer steps.
+        if self.use_tactile and self.use_tactile_dream and self.training:
             tactile_raw = getattr(action_input, "tactile", None)
             if (
                 tactile_raw is not None
@@ -852,7 +857,9 @@ class Gr00tN1d7(PreTrainedModel):
         visual = self.backbone.model.visual
         fpv = backbone_inputs["future_pixel_values"]
         fthw = backbone_inputs["future_image_grid_thw"]
-        embeds = visual(fpv, fthw)  # [sum_merged_tokens, D_vis]
+        # Qwen3-VL vision tower returns (hidden_states, deepstack_feature_lists);
+        # we only need the merged patch tokens. [sum_merged_tokens, D_vis]
+        embeds = visual(fpv, fthw)[0]
         merge = self.backbone.model.config.vision_config.spatial_merge_size
         counts = (fthw.prod(dim=-1) // (merge**2)).tolist()
         pooled = torch.stack(

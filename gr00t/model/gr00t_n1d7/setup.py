@@ -128,11 +128,20 @@ class Gr00tN1d7Pipeline(ModelPipeline):
 
             unexpected_keys = loading_info.get("unexpected_keys", [])
             mismatched_keys = loading_info.get("mismatched_keys", [])
-            # Tactile modules (encoder / EMA target / dream head) are new when
-            # finetuning a tactile-free base checkpoint; like mask_token, they are
-            # initialized fresh, so don't treat them as a load error.
+            # Tactile / state-dream modules (encoder, EMA target encoder, dream
+            # head) are new when finetuning a tactile/dream-free base checkpoint;
+            # like mask_token, they are initialized fresh, so don't treat them as
+            # a load error.
+            fresh_init_substrings = (
+                "mask_token",
+                "tactile",
+                "dream",
+                "target_encoder",
+            )
             other_missing = [
-                k for k in missing_keys if "mask_token" not in k and "tactile" not in k
+                k
+                for k in missing_keys
+                if not any(s in k for s in fresh_init_substrings)
             ]
             errors = []
             if other_missing:
@@ -146,6 +155,31 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     "Checkpoint weight mismatch for "
                     f"{self.config.training.start_from_checkpoint}:\n" + "\n".join(errors)
                 )
+
+            # EMA target encoders are deepcopied from their online encoders in
+            # __init__, i.e. *before* from_pretrained overwrites the online
+            # encoders. For an online encoder that exists in the checkpoint
+            # (e.g. state_encoder), the target would otherwise keep stale
+            # pre-load (random) weights and diverge from the loaded online
+            # encoder. Re-sync target <- online so JEPA targets start matched.
+            action_head = getattr(model, "action_head", None)
+            if action_head is not None and getattr(
+                action_head, "use_tactile_dream", False
+            ):
+                with torch.no_grad():
+                    if getattr(action_head, "dream_state", False) and hasattr(
+                        action_head, "state_target_encoder"
+                    ):
+                        action_head.state_target_encoder.load_state_dict(
+                            action_head.state_encoder.state_dict()
+                        )
+                        logging.info(
+                            "state_target_encoder re-synced from loaded state_encoder"
+                        )
+                    if hasattr(action_head, "tactile_target_encoder"):
+                        action_head.tactile_target_encoder.load_state_dict(
+                            action_head.tactile_encoder.state_dict()
+                        )
 
         else:
             model = self.model_class(
