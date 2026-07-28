@@ -8,14 +8,37 @@
   你可以搜索cnn / tactile
 [gr00t/configs/model/gr00t_n1d7.py](gr00t/configs/model/gr00t_n1d7.py)
 
-## 1.2 launch training
+## 1.2 Ubuntu 20.04 / A800 flash-attn
+
+This host uses GLIBC 2.31, while the prebuilt `flash-attn` wheel pinned by
+`uv.lock` requires GLIBC 2.32. Build the same package version locally for SM80:
+
+```bash
+CUDA_VISIBLE_DEVICES='' \
+CUDA_HOME=/usr/local/cuda-12.8 \
+FLASH_ATTN_CUDA_ARCHS=80 \
+MAX_JOBS=8 \
+FLASH_ATTENTION_FORCE_BUILD=TRUE \
+PATH="$PWD/.venv/bin:/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin:/bin" \
+uv pip install --python .venv/bin/python \
+    --reinstall-package flash-attn \
+    --no-deps \
+    --no-binary flash-attn \
+    --no-build-isolation \
+    'flash-attn==2.7.4.post1'
+```
+
+On this host, use `uv run --no-sync` after the local build. A plain `uv run`
+reinstalls the incompatible prebuilt wheel from `uv.lock` before launching.
+
+## 1.3 launch training
 ```bash
 tmux new -s dream_state
 
 export NUM_GPUS=4
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 
-uv run torchrun --nproc_per_node=4 --master_port=29501 \
+uv run --no-sync torchrun --nproc_per_node=4 --master_port=29501 \
     gr00t/experiment/launch_finetune.py \
     --base-model-path nvidia/GR00T-N1.7-3B \
     --dataset-path data/carry-bucket-stereo \
@@ -36,4 +59,4 @@ uv run torchrun --nproc_per_node=4 --master_port=29501 \
     --tactile-encoder-type mlp
 ```
 --use-tactile input \  #dream/input/notac
---tactile-encoder-type coord  #mlp/cnn/coord     
+--tactile-encoder-type coord  #mlp/cnn/coord
