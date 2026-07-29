@@ -15,7 +15,66 @@
 
 # Finetune config used for single node post-training.
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
+
+
+NamedTactileMode = Literal["notactile", "htd", "jepa"]
+
+
+@dataclass(frozen=True)
+class TactileModeSettings:
+    """Resolved switches for one tactile experiment mode."""
+
+    use_tactile: Literal["dream", "input", "notac"]
+    dream_state: bool
+    dream_vision: bool
+
+
+NAMED_TACTILE_MODES: dict[NamedTactileMode, TactileModeSettings] = {
+    "notactile": TactileModeSettings("notac", False, False),
+    "htd": TactileModeSettings("dream", False, False),
+    "jepa": TactileModeSettings("dream", True, True),
+}
+
+
+def resolve_tactile_mode(
+    tactile_mode: NamedTactileMode | None,
+    *,
+    use_tactile: Literal["dream", "input", "notac"],
+    dream_state: bool,
+    dream_vision: bool,
+) -> TactileModeSettings:
+    """Resolve a fixed named mode, falling back to the legacy independent switches."""
+
+    if tactile_mode is not None:
+        return NAMED_TACTILE_MODES[tactile_mode]
+    return TactileModeSettings(use_tactile, dream_state, dream_vision)
+
+
+def configure_tactile_data_windows(
+    modality_config: dict[str, Any],
+    settings: TactileModeSettings,
+    *,
+    dream_horizon: int,
+    vision_horizon: int,
+) -> None:
+    """Load future observations only for auxiliary targets enabled by ``settings``."""
+
+    if settings.use_tactile == "notac":
+        modality_config.pop("tactile", None)
+    else:
+        if "tactile" not in modality_config:
+            raise ValueError("The selected tactile mode requires a tactile modality")
+        tactile_horizon = dream_horizon + 1 if settings.use_tactile == "dream" else 1
+        modality_config["tactile"].delta_indices = list(range(tactile_horizon))
+
+    dream_enabled = settings.use_tactile == "dream"
+    modality_config["state"].delta_indices = (
+        list(range(dream_horizon + 1)) if dream_enabled and settings.dream_state else [0]
+    )
+    modality_config["video"].delta_indices = (
+        list(range(vision_horizon + 1)) if dream_enabled and settings.dream_vision else [0]
+    )
 
 
 @dataclass
@@ -57,6 +116,15 @@ class FinetuneConfig:
 
     tune_diffusion_model: bool = True
     """If True, fine-tune the diffusion-based action decoder (if present in the model)."""
+
+    tactile_mode: NamedTactileMode | None = None
+    """Fixed experiment mode for comparable runs:
+      - "notactile": no tactile input and no auxiliary future targets.
+      - "htd": current tactile input plus future-tactile dreaming only.
+      - "jepa": HTD plus future-state and future-stereo-vision JEPA targets.
+
+    When omitted, the legacy ``use_tactile``, ``dream_state``, and ``dream_vision``
+    switches below remain fully supported. When set, this mode is authoritative."""
 
     use_tactile: Literal["dream", "input", "notac"] = "notac"
     """Tactile (skin-suit) mode. Requires the embodiment to declare a `tactile`

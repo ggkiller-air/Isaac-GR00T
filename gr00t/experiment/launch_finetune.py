@@ -16,6 +16,7 @@
 # Launch finetuning for N1.7 on "single node".
 # This script tries to provide a similar user experience as current OSS.
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,11 @@ from pathlib import Path
 import tyro
 
 from gr00t.configs.base_config import get_default_config
-from gr00t.configs.finetune_config import FinetuneConfig
+from gr00t.configs.finetune_config import (
+    FinetuneConfig,
+    configure_tactile_data_windows,
+    resolve_tactile_mode,
+)
 from gr00t.experiment.experiment import run
 
 
@@ -74,6 +79,19 @@ if __name__ == "__main__":
     )
     config.load_config_path = None
 
+    # DataConfig defaults to the global modality registry. Copy it before narrowing
+    # observation windows so one launch cannot mutate another config in-process.
+    config.data.modality_configs = copy.deepcopy(config.data.modality_configs)
+
+    tactile_settings = resolve_tactile_mode(
+        ft_config.tactile_mode,
+        use_tactile=ft_config.use_tactile,
+        dream_state=ft_config.dream_state,
+        dream_vision=ft_config.dream_vision,
+    )
+    if ft_config.tactile_mode is not None:
+        print(f"[launch_finetune] Using fixed tactile mode: {ft_config.tactile_mode}")
+
     # overwrite with finetune config supplied by the user
     config.model.tune_llm = ft_config.tune_llm
     config.model.tune_visual = ft_config.tune_visual
@@ -82,35 +100,40 @@ if __name__ == "__main__":
     # Translate the user-facing 3-way tactile enums into the model's internal bool
     # combination. "notac"->off, "input"->encoder-only (control), "dream"->full HTD.
     _tactile_mode = {"notac": (False, False), "input": (True, False), "dream": (True, True)}
-    config.model.use_tactile, config.model.use_tactile_dream = _tactile_mode[ft_config.use_tactile]
+    config.model.use_tactile, config.model.use_tactile_dream = _tactile_mode[
+        tactile_settings.use_tactile
+    ]
     config.model.tune_tactile = ft_config.tune_tactile
     # State-JEPA branch rides on the touch-dreaming trunk, so it only applies in
     # "dream" mode. Silently ignore (with a warning) otherwise to avoid a no-op build.
-    config.model.dream_state = ft_config.dream_state and ft_config.use_tactile == "dream"
+    config.model.dream_state = (
+        tactile_settings.dream_state and tactile_settings.use_tactile == "dream"
+    )
     config.model.lambda_state = ft_config.lambda_state
-    if ft_config.dream_state and ft_config.use_tactile != "dream":
+    if tactile_settings.dream_state and tactile_settings.use_tactile != "dream":
         print(
             "[launch_finetune] WARNING: dream_state=True ignored because use_tactile != 'dream' "
             "(state-JEPA needs the touch-dreaming trunk)."
         )
     # Vision-JEPA also rides the post-DiT tactile trunk -> only in "dream" mode.
-    config.model.dream_vision = ft_config.dream_vision and ft_config.use_tactile == "dream"
+    config.model.dream_vision = (
+        tactile_settings.dream_vision and tactile_settings.use_tactile == "dream"
+    )
     config.model.lambda_vision = ft_config.lambda_vision
     config.model.vision_horizon = ft_config.vision_horizon
-    if ft_config.dream_vision and ft_config.use_tactile != "dream":
+    if tactile_settings.dream_vision and tactile_settings.use_tactile != "dream":
         print(
             "[launch_finetune] WARNING: dream_vision=True ignored because use_tactile != 'dream' "
             "(vision-JEPA needs the touch-dreaming trunk)."
         )
-    # Widen the video window so the dataset loads the future frames the vision target
-    # needs -- but ONLY for vision runs, so ordinary runs keep single-frame video IO.
-    # The processor (dream_vision=True) routes frames [1:] to future targets, never the
-    # prompt, so the policy conditioning is byte-identical to a single-frame run.
-    if config.model.dream_vision:
-        vh = config.model.vision_horizon
-        for tag_cfg in config.data.modality_configs.values():
-            if "video" in tag_cfg:
-                tag_cfg["video"].delta_indices = list(range(vh + 1))
+    # Keep current observations on every policy path. Future windows are loaded only
+    # for the enabled auxiliary teachers and are never used as action conditioning.
+    configure_tactile_data_windows(
+        config.data.modality_configs[embodiment_tag],
+        tactile_settings,
+        dream_horizon=config.model.dream_horizon,
+        vision_horizon=config.model.vision_horizon,
+    )
     # "coord" == cnn encoder with CoordConv channels enabled.
     _tactile_enc = {"mlp": ("mlp", False), "cnn": ("cnn", False), "coord": ("cnn", True)}
     config.model.tactile_encoder_type, config.model.tactile_cnn_coord = _tactile_enc[

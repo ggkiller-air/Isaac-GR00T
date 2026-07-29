@@ -24,17 +24,20 @@ from disk into a windowed ``VLAStepData.tactile`` tensor:
 - VLAStepData carries the new ``tactile`` field.
 """
 
+import copy
+
+from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
+from gr00t.configs.finetune_config import (
+    NAMED_TACTILE_MODES,
+    configure_tactile_data_windows,
+    resolve_tactile_mode,
+)
+from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
+from gr00t.data.tactile_layout import get_region_sizes, get_valid_idx, num_valid_channels
+from gr00t.data.types import EmbodimentTag, ModalityConfig
 import numpy as np
 import pandas as pd
 import pytest
-
-from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
-from gr00t.data.tactile_layout import (
-    get_region_sizes,
-    get_valid_idx,
-    num_valid_channels,
-)
-from gr00t.data.types import EmbodimentTag, ModalityConfig
 
 
 def test_tactile_layout_well_formed():
@@ -110,3 +113,74 @@ def test_extract_step_data_end_boundary_padding():
     assert raw.shape == (dream_horizon + 1, 256)
     # clamped future frames repeat the final available frame
     assert np.array_equal(raw[-1], raw[-2])
+
+
+@pytest.mark.parametrize(
+    ("name", "use_tactile", "dream_state", "dream_vision"),
+    [
+        ("notactile", "notac", False, False),
+        ("htd", "dream", False, False),
+        ("jepa", "dream", True, True),
+    ],
+)
+def test_named_tactile_modes_are_fixed(name, use_tactile, dream_state, dream_vision):
+    settings = resolve_tactile_mode(
+        name,
+        use_tactile="input",
+        dream_state=not dream_state,
+        dream_vision=not dream_vision,
+    )
+
+    assert settings == NAMED_TACTILE_MODES[name]
+    assert (settings.use_tactile, settings.dream_state, settings.dream_vision) == (
+        use_tactile,
+        dream_state,
+        dream_vision,
+    )
+
+
+@pytest.mark.parametrize("name", ["notactile", "htd", "jepa"])
+def test_named_modes_load_only_their_auxiliary_future_windows(name):
+    modality_config = copy.deepcopy(MODALITY_CONFIGS["unitree_g1_sonic"])
+    configure_tactile_data_windows(
+        modality_config,
+        NAMED_TACTILE_MODES[name],
+        dream_horizon=4,
+        vision_horizon=4,
+    )
+
+    assert modality_config["state"].delta_indices == ([0, 1, 2, 3, 4] if name == "jepa" else [0])
+    assert modality_config["video"].delta_indices == ([0, 1, 2, 3, 4] if name == "jepa" else [0])
+    if name == "notactile":
+        assert "tactile" not in modality_config
+    else:
+        assert modality_config["tactile"].delta_indices == [0, 1, 2, 3, 4]
+
+
+def test_legacy_tactile_switches_remain_available():
+    settings = resolve_tactile_mode(
+        None,
+        use_tactile="input",
+        dream_state=False,
+        dream_vision=False,
+    )
+
+    assert settings.use_tactile == "input"
+    assert not settings.dream_state
+    assert not settings.dream_vision
+
+    inconsistent = resolve_tactile_mode(
+        None,
+        use_tactile="input",
+        dream_state=True,
+        dream_vision=True,
+    )
+    modality_config = copy.deepcopy(MODALITY_CONFIGS["unitree_g1_sonic"])
+    configure_tactile_data_windows(
+        modality_config,
+        inconsistent,
+        dream_horizon=4,
+        vision_horizon=4,
+    )
+    assert modality_config["state"].delta_indices == [0]
+    assert modality_config["video"].delta_indices == [0]
