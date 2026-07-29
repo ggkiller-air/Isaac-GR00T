@@ -121,10 +121,8 @@ MODALITY_CONFIGS = {
             delta_indices=[0],
             modality_keys=["annotation.human.task_description"],
         ),
-        # NOTE: the tactile (skin-suit) modality is intentionally NOT registered
-        # here. It is opt-in per dataset via --modality-config-path (see
-        # examples/sonic_tactile/modality_config.py), so SONIC datasets without an
-        # observation.tactile_raw column keep working unchanged.
+        # Tactile is registered for the JEPA checkpoint above. Online inference
+        # supplies only the current frame; positive deltas remain training targets.
     },
     "unitree_g1_full_body_with_waist_height_nav_cmd": {
         "video": ModalityConfig(

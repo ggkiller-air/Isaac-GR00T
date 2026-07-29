@@ -101,6 +101,9 @@ class Gr00tPolicy(BasePolicy):
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model
+        self.requires_tactile = bool(
+            getattr(getattr(model, "action_head", None), "use_tactile", False)
+        )
 
         # Load the processor for input/output transformation.
         # Training saves processor files under a "processor/" subdirectory, but
@@ -154,6 +157,11 @@ class Gr00tPolicy(BasePolicy):
             for k, v in all_modality_configs[self.embodiment_tag.value].items()
             if k != "rl_info"
         }
+        if self.requires_tactile and "tactile" not in self.modality_configs:
+            raise ValueError(
+                "This checkpoint enables tactile fusion, but its processor has no "
+                "tactile modality config"
+            )
         self.collate_fn = self.processor.collator
 
         # Extract and validate language configuration
@@ -185,6 +193,10 @@ class Gr00tPolicy(BasePolicy):
                 "state": {k: v[i] for k, v in value["state"].items()},
                 "language": {k: v[i] for k, v in value["language"].items()},
             }
+            if "tactile" in value:
+                unbatched_value["tactile"] = {
+                    k: v[i] for k, v in value["tactile"].items()
+                }
             unbatched_obs.append(unbatched_value)
         return unbatched_obs
 
@@ -201,6 +213,7 @@ class Gr00tPolicy(BasePolicy):
             images=observation["video"],
             states=observation["state"],
             actions={},  # No ground truth actions during inference
+            tactile=observation.get("tactile"),
             text=observation["language"][self.language_key][0],
             embodiment=self.embodiment_tag,
         )
@@ -232,7 +245,10 @@ class Gr00tPolicy(BasePolicy):
             AssertionError: If any validation check fails
         """
         # Check that observation contains all required top-level modality keys
-        for modality in ["video", "state", "language"]:
+        required_modalities = ["video", "state", "language"]
+        if self.requires_tactile:
+            required_modalities.append("tactile")
+        for modality in required_modalities:
             assert modality in observation, f"Observation must contain a '{modality}' key"
             assert isinstance(observation[modality], dict), (
                 f"Observation '{modality}' must be a dictionary. Got {type(observation[modality])}: {observation[modality]}"
@@ -274,8 +290,13 @@ class Gr00tPolicy(BasePolicy):
             )
 
             # Verify temporal dimension matches the expected horizon from config
-            assert batched_video.shape[1] == len(self.modality_configs["video"].delta_indices), (
-                f"Video key '{video_key}'s horizon must be {len(self.modality_configs['video'].delta_indices)}. Got {batched_video.shape[1]}"
+            video_indices = self.modality_configs["video"].delta_indices
+            online_video_horizon = (
+                1 if any(index > 0 for index in video_indices) else len(video_indices)
+            )
+            assert batched_video.shape[1] == online_video_horizon, (
+                f"Online video key '{video_key}' must have horizon {online_video_horizon}. "
+                f"Got {batched_video.shape[1]}"
             )
 
             # Verify channel dimension is 3 (RGB images)
@@ -318,9 +339,57 @@ class Gr00tPolicy(BasePolicy):
             )
 
             # Verify temporal dimension matches the expected horizon from config
-            assert batched_state.shape[1] == len(self.modality_configs["state"].delta_indices), (
-                f"State key '{state_key}'s horizon must be {len(self.modality_configs['state'].delta_indices)}. Got {batched_state.shape[1]}"
+            state_indices = self.modality_configs["state"].delta_indices
+            online_state_horizon = (
+                1 if any(index > 0 for index in state_indices) else len(state_indices)
             )
+            assert batched_state.shape[1] == online_state_horizon, (
+                f"Online state key '{state_key}' must have horizon {online_state_horizon}. "
+                f"Got {batched_state.shape[1]}"
+            )
+
+            assert np.isfinite(batched_state).all(), (
+                f"State key '{state_key}' contains NaN or infinity"
+            )
+
+        # ===== TACTILE VALIDATION =====
+        tactile = observation.get("tactile")
+        if tactile is not None:
+            assert isinstance(tactile, dict), (
+                f"Observation 'tactile' must be a dictionary. Got {type(tactile)}"
+            )
+            tactile_cfg = self.modality_configs.get("tactile")
+            assert tactile_cfg is not None, (
+                "Observation contains tactile data, but this checkpoint has no tactile config"
+            )
+            for tactile_key in tactile_cfg.modality_keys:
+                assert tactile_key in tactile, (
+                    f"Tactile key '{tactile_key}' must be in observation"
+                )
+                batched_tactile = tactile[tactile_key]
+                assert isinstance(batched_tactile, np.ndarray), (
+                    f"Tactile key '{tactile_key}' must be a numpy array. "
+                    f"Got {type(batched_tactile)}"
+                )
+                assert batched_tactile.dtype == np.uint8, (
+                    f"Tactile key '{tactile_key}' must have dtype uint8. "
+                    f"Got {batched_tactile.dtype}"
+                )
+                assert batched_tactile.ndim == 3, (
+                    f"Tactile key '{tactile_key}' must have shape (B, 1, 256), "
+                    f"got {batched_tactile.shape}"
+                )
+                assert batched_tactile.shape[1:] == (1, 256), (
+                    f"Online tactile key '{tactile_key}' must have shape (B, 1, 256), "
+                    f"got {batched_tactile.shape}"
+                )
+                if bs == -1:
+                    bs = batched_tactile.shape[0]
+                else:
+                    assert batched_tactile.shape[0] == bs, (
+                        f"Tactile key '{tactile_key}' must have batch size {bs}. "
+                        f"Got {batched_tactile.shape[0]}"
+                    )
 
         # ===== LANGUAGE VALIDATION =====
         # Validate each language stream defined in the modality config
