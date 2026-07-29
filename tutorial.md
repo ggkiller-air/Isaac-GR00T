@@ -36,15 +36,16 @@ uv pip install --python .venv/bin/python --reinstall-package flash-attn --no-dep
   --no-binary flash-attn --no-build-isolation 'flash-attn==2.7.4.post1'
 ```
 
-## Two-GPU smoke runs
+## Full training
 
-Check `nvidia-smi` first and use only idle GPUs. These commands run two optimizer steps; they
-verify the real data/model path but are not training experiments.
+These are the complete 20k-step runs used for the three comparable experiments. The tested
+four-A800 setting uses global batch 32, four data workers per rank, W&B logging, and keeps
+only the latest checkpoint.
 
 ```bash
 cd /root/Projects/Isaac-GR00T
-export CUDA_VISIBLE_DEVICES=2,3
-export NUM_GPUS=2
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export NUM_GPUS=4
 
 COMMON_ARGS=(
   --base-model-path nvidia/GR00T-N1.7-3B
@@ -52,30 +53,32 @@ COMMON_ARGS=(
   --embodiment-tag UNITREE_G1_SONIC
   --modality-config-path gr00t/configs/data/embodiment_configs.py
   --num-gpus "$NUM_GPUS"
-  --global-batch-size 2
-  --dataloader-num-workers 2
-  --max-steps 2
-  --save-steps 2
+  --global-batch-size 32
+  --dataloader-num-workers 4
+  --max-steps 20000
+  --save-steps 10000
   --save-total-limit 1
+  --use-wandb
+  --wandb-project univlat
+  --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08
   --tactile-encoder-type mlp
 )
 
-uv run --no-sync torchrun --nproc_per_node=2 --master_port=29501 \
+uv run --no-sync torchrun --nproc_per_node="$NUM_GPUS" --master_port=29501 \
   gr00t/experiment/launch_finetune.py "${COMMON_ARGS[@]}" \
-  --tactile-mode notactile --output-dir outputs/sonic_notactile_smoke
+  --tactile-mode notactile --output-dir outputs/sonic_notactile
 
-uv run --no-sync torchrun --nproc_per_node=2 --master_port=29502 \
+uv run --no-sync torchrun --nproc_per_node="$NUM_GPUS" --master_port=29502 \
   gr00t/experiment/launch_finetune.py "${COMMON_ARGS[@]}" \
-  --tactile-mode htd --output-dir outputs/sonic_htd_smoke
+  --tactile-mode htd --output-dir outputs/sonic_htd
 
-uv run --no-sync torchrun --nproc_per_node=2 --master_port=29503 \
+uv run --no-sync torchrun --nproc_per_node="$NUM_GPUS" --master_port=29503 \
   gr00t/experiment/launch_finetune.py "${COMMON_ARGS[@]}" \
-  --tactile-mode jepa --output-dir outputs/sonic_jepa_smoke
+  --tactile-mode jepa --output-dir outputs/sonic_jepa
 ```
 
-Checkpoints are written to `outputs/sonic_<mode>_smoke/checkpoint-2`. Increase
-`--max-steps`, batch size, save interval, and output path for a real run; add `--use-wandb`
-only when desired.
+Checkpoints are emitted at steps 10000 and 20000. Because `--save-total-limit 1` is set,
+only `outputs/sonic_<mode>/checkpoint-20000` remains after training.
 
 ## Native GR00T deployment
 
@@ -84,7 +87,7 @@ Start the GR00T ZMQ policy server:
 ```bash
 cd /root/Projects/Isaac-GR00T
 uv run --no-sync python gr00t/eval/run_gr00t_server.py \
-  --model-path outputs/sonic_jepa_smoke/checkpoint-2 \
+  --model-path outputs/sonic_jepa/checkpoint-20000 \
   --embodiment-tag UNITREE_G1_SONIC --device cuda:0 --port 5550
 ```
 
