@@ -666,7 +666,7 @@ class Gr00tN1d7Processor(BaseProcessor):
             transformed_inputs["action_mask"] = action_mask
         transformed_inputs["embodiment_id"] = self.embodiment_id_mapping[embodiment_tag.value]
 
-        # Tactile: forward the raw skin packet [T, raw_dim] verbatim. The 256->112
+        # Tactile: concatenate vest/left/right [T, 256] streams. The 768->624
         # valid-channel select and /255 happen in the tactile encoder. T equals the
         # number of tactile delta_indices (current frame + future touch-dreaming
         # targets). The collator stacks this into [B, T, raw_dim].

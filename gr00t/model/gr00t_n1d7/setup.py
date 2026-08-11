@@ -81,6 +81,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
         if self.config.training.start_from_checkpoint is not None and not skip_weight_loading:
             model, loading_info = AutoModel.from_pretrained(
                 self.config.training.start_from_checkpoint,
+                # The checkpoint's saved config contains the original remote
+                # backbone ID. Preserve the launcher's resolved override so
+                # cached/local backbones remain fully offline-capable.
+                model_name=self.config.model.model_name,
                 tune_llm=self.config.model.tune_llm,
                 tune_visual=self.config.model.tune_visual,
                 tune_projector=self.config.model.tune_projector,

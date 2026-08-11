@@ -13,27 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tactile (skin-suit) sensor layout for the ``unitree_g1_sonic`` embodiment.
+"""Three-device tactile layout for the ``unitree_g1_sonic`` embodiment.
 
-The raw on-disk column ``observation.tactile_raw`` is a ``uint8[256]`` packet
-(front 128 + back 128 merged). Only 112 of the 256 positions are physically
-wired sensels; the rest are reserved/empty. This module is the single source of
-truth that maps the spec-sheet's six body regions onto positions in that 256
-array, and exposes:
+``desk_sweep`` records ``vest``, ``left_arm`` and ``right_arm`` as three
+``uint8[256]`` streams. The data processor concatenates them in that order. The
+vest contributes 112 wired sensels in six regions; each arm contributes a full
+16x16 grid. This module maps that 768-wide packet to eight physical regions.
 
-- :func:`get_valid_idx` -- the 112 wired positions as a flat, region-ordered,
+- :func:`get_valid_idx` -- the 624 wired positions as a flat, region-ordered,
   **0-based** index list (suitable for ``tensor[..., valid_idx]``).
 - :func:`get_region_sizes` -- per-region channel counts, in the same order.
 
-Region order (and therefore the order of ``valid_idx`` / ``region_sizes``):
-``front_chest(48), back(40), left_arm(8), left_shoulder(4), right_arm(8),
-right_shoulder(4)`` -> sizes ``[48, 40, 8, 4, 8, 4]`` (sum 112).
+Region order is the six vest regions followed by the left and right 16x16 arm
+grids. The arm device order is 129..256 then 1..128 per the hardware spec.
 
 The values in ``REGIONS[*].indices`` are **1-based** positions in the 256-byte
 raw array (as delivered by the sensor spec sheet); helpers below convert to
-0-based. Verified against ``outputs/carry-bucket-stereo``: all 112 are unique
-and lie in ``[1, 256]``, and every channel that is ever non-zero in the dataset
-falls inside this valid set.
+0-based within the vest stream. Arm indices are offset into the concatenated
+packet below.
 """
 
 from __future__ import annotations
@@ -196,25 +193,25 @@ REGIONS: list[RegionSpec] = [
     ),
 ]
 
-# Full raw packet width on disk (observation.tactile_raw).
-TACTILE_RAW_DIM: int = 256
+TACTILE_STREAM_KEYS: tuple[str, ...] = ("vest", "left_arm", "right_arm")
+TACTILE_DEVICE_DIM: int = 256
+TACTILE_RAW_DIM: int = len(TACTILE_STREAM_KEYS) * TACTILE_DEVICE_DIM
+ARM_ORDER: tuple[int, ...] = tuple(range(128, 256)) + tuple(range(128))
 
 
 def get_valid_idx() -> list[int]:
-    """Flat, region-ordered, 0-based positions of the 112 wired sensels.
-
-    Use as ``raw[..., get_valid_idx()]`` to select the 112 valid channels from a
-    256-wide raw tactile vector, ordered region-by-region (front_chest first).
-    """
+    """Flat, region-ordered positions in the concatenated 768-wide packet."""
     idx: list[int] = []
     for region in REGIONS:
         idx.extend(i - 1 for i in region.indices)  # 1-based -> 0-based
+    idx.extend(TACTILE_DEVICE_DIM + i for i in ARM_ORDER)
+    idx.extend(2 * TACTILE_DEVICE_DIM + i for i in ARM_ORDER)
     return idx
 
 
 def get_region_sizes() -> list[int]:
-    """Per-region channel counts in region order, e.g. ``[48, 40, 8, 4, 8, 4]``."""
-    return [len(region.indices) for region in REGIONS]
+    """Per-region channel counts for six vest regions and two arm grids."""
+    return [len(region.indices) for region in REGIONS] + [256, 256]
 
 
 def get_region_grids() -> list[tuple[int, int]]:
@@ -224,16 +221,16 @@ def get_region_grids() -> list[tuple[int, int]]:
     region with these shapes for 2D (CNN) encoders; ``rows * cols == region_size``
     holds for every region (enforced by :func:`_validate`).
     """
-    return [(region.rows, region.cols) for region in REGIONS]
+    return [(region.rows, region.cols) for region in REGIONS] + [(16, 16), (16, 16)]
 
 
 def get_region_keys() -> list[str]:
     """Region keys in order, e.g. ``["front_chest", "back", ...]``."""
-    return [region.key for region in REGIONS]
+    return [f"vest.{region.key}" for region in REGIONS] + ["left_arm", "right_arm"]
 
 
 def num_valid_channels() -> int:
-    """Total wired sensels across all regions (112)."""
+    """Total wired sensels across all eight regions (624)."""
     return sum(get_region_sizes())
 
 
@@ -246,7 +243,10 @@ def _validate() -> None:
         )
         flat.extend(region.indices)
     assert len(set(flat)) == len(flat), "duplicate tactile indices across regions"
-    assert min(flat) >= 1 and max(flat) <= TACTILE_RAW_DIM, "tactile index out of [1, 256]"
+    assert min(flat) >= 1 and max(flat) <= TACTILE_DEVICE_DIM, "vest index out of [1, 256]"
+    valid = get_valid_idx()
+    assert len(set(valid)) == len(valid), "duplicate indices in concatenated tactile layout"
+    assert min(valid) >= 0 and max(valid) < TACTILE_RAW_DIM, "tactile index out of range"
 
 
 _validate()

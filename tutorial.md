@@ -20,7 +20,7 @@ not a claim that GR00T reproduces the paper's complete policy and controller sys
 ## Environment
 
 ```bash
-cd /root/Projects/Isaac-GR00T
+cd /home/wzh/Projects/Uni_VLaT/Isaac-GR00T
 uv sync --python 3.10 --all-extras
 uv run --no-sync python -c 'import torch; print(torch.__version__, torch.cuda.is_available())'
 ```
@@ -43,21 +43,28 @@ four-A800 setting uses global batch 32, four data workers per rank, W&B logging,
 only the latest checkpoint.
 
 ```bash
-cd /root/Projects/Isaac-GR00T
+cd /home/wzh/Projects/Uni_VLaT/Isaac-GR00T
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export NUM_GPUS=4
+export WANDB_MODE=online
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export NO_ALBUMENTATIONS_UPDATE=1
+export GR00T_BASE_MODEL_PATH=/home/wzh/.cache/huggingface/hub/models--nvidia--GR00T-N1.7-3B/snapshots/2fc962b973bccdd5d8ce4f67cc63b264d6886495
+export GR00T_BACKBONE_NAME=/home/wzh/.cache/huggingface/hub/models--nvidia--Cosmos-Reason2-2B/snapshots/9ce19a195e423419c349abfc86fd07178b230561
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 
 COMMON_ARGS=(
-  --base-model-path nvidia/GR00T-N1.7-3B
-  --dataset-path /root/Projects/data/carry-bucket-stereo
+  --base-model-path "$GR00T_BASE_MODEL_PATH"
+  --dataset-path /home/wzh/Projects/Uni_VLaT/data/desk_sweep
   --embodiment-tag UNITREE_G1_SONIC
   --modality-config-path gr00t/configs/data/embodiment_configs.py
   --num-gpus "$NUM_GPUS"
-  --global-batch-size 32
-  --dataloader-num-workers 4
-  --max-steps 20000
-  --save-steps 10000
-  --save-total-limit 1
+  --global-batch-size 64
+  --dataloader-num-workers 8
+  --max-steps 50000
+  --save-steps 5000
+  --save-total-limit 5
   --use-wandb
   --wandb-project univlat
   --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08
@@ -85,7 +92,7 @@ only `outputs/sonic_<mode>/checkpoint-20000` remains after training.
 Start the GR00T ZMQ policy server:
 
 ```bash
-cd /root/Projects/Isaac-GR00T
+cd /home/wzh/Projects/Uni_VLaT/Isaac-GR00T
 uv run --no-sync python gr00t/eval/run_gr00t_server.py \
   --model-path outputs/sonic_jepa/checkpoint-20000 \
   --embodiment-tag UNITREE_G1_SONIC --device cuda:0 --port 5550
@@ -94,7 +101,7 @@ uv run --no-sync python gr00t/eval/run_gr00t_server.py \
 Then start the unchanged SONIC workflow from the shared controller repository:
 
 ```bash
-cd /root/Projects/GR00T-WholeBodyControl
+cd /home/wzh/Projects/Uni_VLaT/GR00T-WholeBodyControl
 python gear_sonic/scripts/launch_inference.py \
   --policy-host 127.0.0.1 --policy-port 5550 \
   --camera-host 192.168.123.164 --tactile-zmq-host 192.168.123.164 \
@@ -106,7 +113,7 @@ For a `notactile` checkpoint, omit `--tactile-zmq-host` and add `--no-use-tactil
 ## Shared `sonic_vla_v1` boundary
 
 Every backend must accept `state: float32[46]`, `ego_view_left/right: uint8[H,W,3]`,
-`prompt: str`, and tactile `uint8[256]` only when its metadata says it is required. It must
+`prompt: str`, and tactile `uint8[768]` only when its metadata says it is required. It must
 return finite `actions: float32[40,78]` with
 `motion_token[0:64] | left_hand[64:71] | right_hand[71:78]`. SONIC decodes the 64-D motion
 token and controls the G1; the VLA does not directly output whole-body joint commands.

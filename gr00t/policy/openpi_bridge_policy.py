@@ -30,6 +30,7 @@ from gr00t.policy.policy import BasePolicy
 
 
 _SONIC_TAG = "unitree_g1_sonic"
+_TACTILE_KEYS = ("vest", "left_arm", "right_arm")
 
 # Canonical websocket contract shared by openpi, starVLA, and DiT4DiT.
 _CONTRACT = "sonic_vla_v1"
@@ -134,12 +135,13 @@ class OpenpiBridgePolicy(BasePolicy):
             )
         tactile = observation.get("tactile")
         if tactile is not None:
-            raw = tactile.get("tactile_raw")
-            assert isinstance(raw, np.ndarray), "tactile_raw must be a numpy array"
-            assert raw.dtype == np.uint8, "tactile_raw must have dtype uint8"
-            assert raw.shape == (batch_size, 1, 256), (
-                f"tactile_raw must have shape (B, 1, 256), got {raw.shape}"
-            )
+            for key in _TACTILE_KEYS:
+                raw = tactile.get(key)
+                assert isinstance(raw, np.ndarray), f"{key} must be a numpy array"
+                assert raw.dtype == np.uint8, f"{key} must have dtype uint8"
+                assert raw.shape == (batch_size, 1, 256), (
+                    f"{key} must have shape (B, 1, 256), got {raw.shape}"
+                )
 
         prompt_batch = observation["language"].get(self.language_key)
         assert isinstance(prompt_batch, list) and len(prompt_batch) == batch_size, (
@@ -206,11 +208,13 @@ class OpenpiBridgePolicy(BasePolicy):
                 "prompt": self._extract_prompt(language, i),
             }
             # Forward the current tactile frame if the deployment provides it. The openpi model
-            # (if trained with use_tactile) needs only the current frame [256] uint8; SonicInputs
-            # wraps it to [1, 256]. Requires the GR00T modality config to include tactile.
+            # (if trained with use_tactile) receives the three current device frames
+            # concatenated in the canonical vest/left/right order.
             tactile = observation.get("tactile")
-            if tactile is not None and "tactile_raw" in tactile:
-                obs_i["tactile"] = np.asarray(tactile["tactile_raw"][i, 0], dtype=np.uint8)
+            if tactile is not None:
+                obs_i["tactile"] = np.concatenate(
+                    [np.asarray(tactile[key][i, 0], dtype=np.uint8) for key in _TACTILE_KEYS]
+                )
 
             out = self.client.infer(obs_i)
             if "actions" not in out:

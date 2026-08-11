@@ -156,13 +156,13 @@ class Gr00tN1d7Config(PretrainedConfig):
     # Tactile (skin-suit) modality + touch-dreaming (HTD graft, arXiv:2604.13015).
     # `use_tactile` gates the entire feature: when False the model is byte-for-byte
     # the original N1.7. The raw on-disk packet is `tactile_raw_dim` wide; the
-    # encoder selects `tactile_valid_idx` (256->112 for unitree_g1_sonic, defaulted
+    # encoder selects `tactile_valid_idx` (768->624 for unitree_g1_sonic, defaulted
     # from gr00t/data/tactile_layout.py) and splits them by `tactile_region_sizes`.
     # If `tactile_valid_idx` is None, the encoder falls back to using all
     # `tactile_raw_dim` channels as a single region (lets training start before a
     # spec mapping is available).
     use_tactile: bool = False
-    tactile_raw_dim: int = 256
+    tactile_raw_dim: int = 768
     tactile_valid_idx: list[int] | None = field(default_factory=_default_tactile_valid_idx)
     tactile_region_sizes: list[int] | None = field(default_factory=_default_tactile_region_sizes)
     # Per-region encoder: "mlp" (default; flat per-region MLP) or "cnn" (per-region

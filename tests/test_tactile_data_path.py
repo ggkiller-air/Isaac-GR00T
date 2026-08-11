@@ -15,17 +15,18 @@
 
 """CPU-only tests for the tactile (skin-suit) data path.
 
-Covers the four Phase-1 data-layer changes that bring ``observation.tactile_raw``
-from disk into a windowed ``VLAStepData.tactile`` tensor:
+Covers the three-device tactile path from disk into windowed tensors:
 
-- tactile_layout: the 256->112 valid-channel map is well formed.
+- tactile_layout: the 768->624 eight-region map is well formed.
 - extract_step_data: applies tactile delta_indices (current + future frames for
-  touch dreaming) and stacks into a numeric ``(T, 256)`` array.
+  touch dreaming) and stacks each stream into a numeric ``(T, 256)`` array.
 - VLAStepData carries the new ``tactile`` field.
 """
 
 import copy
+from types import SimpleNamespace
 
+from gr00t.configs.base_config import get_default_config
 from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
 from gr00t.configs.finetune_config import (
     NAMED_TACTILE_MODES,
@@ -35,30 +36,34 @@ from gr00t.configs.finetune_config import (
 from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
 from gr00t.data.tactile_layout import get_region_sizes, get_valid_idx, num_valid_channels
 from gr00t.data.types import EmbodimentTag, ModalityConfig
+from gr00t.model.gr00t_n1d7 import setup
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 
 def test_tactile_layout_well_formed():
     valid_idx = get_valid_idx()
     sizes = get_region_sizes()
-    assert len(valid_idx) == 112
-    assert num_valid_channels() == 112
-    assert sum(sizes) == 112
-    assert sizes == [48, 40, 8, 4, 8, 4]
-    # 0-based, unique, within the 256-wide raw packet
-    assert len(set(valid_idx)) == 112
-    assert min(valid_idx) >= 0 and max(valid_idx) <= 255
+    assert len(valid_idx) == 624
+    assert num_valid_channels() == 624
+    assert sum(sizes) == 624
+    assert sizes == [48, 40, 8, 4, 8, 4, 256, 256]
+    assert len(set(valid_idx)) == 624
+    assert min(valid_idx) >= 0 and max(valid_idx) < 768
 
 
-def _fake_episode(n_frames: int = 12, raw_dim: int = 256, seed: int = 0) -> pd.DataFrame:
+def _fake_episode(n_frames: int = 12, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     return pd.DataFrame(
         {
-            "tactile.tactile_raw": [
-                rng.integers(0, 256, size=raw_dim, dtype=np.uint8) for _ in range(n_frames)
-            ],
+            **{
+                f"tactile.{key}": [
+                    rng.integers(0, 256, size=256, dtype=np.uint8) for _ in range(n_frames)
+                ]
+                for key in ("vest", "left_arm", "right_arm")
+            },
             "language.task": ["carry the bucket"] * n_frames,
         }
     )
@@ -68,7 +73,7 @@ def _tactile_only_configs(dream_horizon: int = 4):
     return {
         "tactile": ModalityConfig(
             delta_indices=list(range(dream_horizon + 1)),
-            modality_keys=["tactile_raw"],
+            modality_keys=["vest", "left_arm", "right_arm"],
         ),
         "language": ModalityConfig(delta_indices=[0], modality_keys=["task"]),
     }
@@ -84,14 +89,13 @@ def test_extract_step_data_windows_tactile():
     )
 
     assert step.tactile is not None
-    raw = step.tactile["tactile_raw"]
-    # current frame + dream_horizon future frames, full raw width, numeric
-    assert raw.shape == (dream_horizon + 1, 256)
+    raw = np.concatenate([step.tactile[key] for key in ("vest", "left_arm", "right_arm")], axis=-1)
+    assert raw.shape == (dream_horizon + 1, 768)
     assert raw.dtype == np.float32
 
     # valid-channel select + /255 normalization (done downstream by the encoder)
     valid = raw[:, get_valid_idx()] / 255.0
-    assert valid.shape == (dream_horizon + 1, 112)
+    assert valid.shape == (dream_horizon + 1, 624)
     assert valid.min() >= 0.0 and valid.max() <= 1.0
 
 
@@ -109,8 +113,8 @@ def test_extract_step_data_end_boundary_padding():
         embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
         allow_padding=True,
     )
-    raw = step.tactile["tactile_raw"]
-    assert raw.shape == (dream_horizon + 1, 256)
+    raw = np.concatenate([step.tactile[key] for key in ("vest", "left_arm", "right_arm")], axis=-1)
+    assert raw.shape == (dream_horizon + 1, 768)
     # clamped future frames repeat the final available frame
     assert np.array_equal(raw[-1], raw[-2])
 
@@ -184,3 +188,43 @@ def test_legacy_tactile_switches_remain_available():
     )
     assert modality_config["state"].delta_indices == [0]
     assert modality_config["video"].delta_indices == [0]
+
+
+class _LoadedModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+        self.config = SimpleNamespace(to_filtered_json=lambda: "{}")
+
+
+def test_checkpoint_load_preserves_resolved_backbone_path(monkeypatch, tmp_path):
+    config = get_default_config()
+    config.model.model_name = "/cache/Cosmos-Reason2-2B/snapshot"
+    config.training.start_from_checkpoint = "/cache/GR00T-N1.7-3B/snapshot"
+
+    captured = {}
+
+    def fake_from_pretrained(checkpoint, **kwargs):
+        captured["checkpoint"] = checkpoint
+        captured["kwargs"] = kwargs
+        return _LoadedModel(), {
+            "missing_keys": [],
+            "unexpected_keys": [],
+            "mismatched_keys": [],
+        }
+
+    monkeypatch.setattr(setup.AutoModel, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(setup, "get_rank", lambda: 1)
+
+    pipeline = setup.Gr00tN1d7Pipeline.__new__(setup.Gr00tN1d7Pipeline)
+    pipeline.config = config
+    pipeline.save_cfg_dir = tmp_path
+    pipeline.transformers_loading_kwargs = {
+        "trust_remote_code": True,
+        "local_files_only": True,
+    }
+
+    pipeline._create_model()
+
+    assert captured["checkpoint"] == config.training.start_from_checkpoint
+    assert captured["kwargs"]["model_name"] == config.model.model_name

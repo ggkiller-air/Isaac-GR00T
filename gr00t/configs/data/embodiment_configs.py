@@ -71,7 +71,7 @@ MODALITY_CONFIGS = {
         ),
         "tactile": ModalityConfig(
             delta_indices=list(range(5)),
-            modality_keys=["tactile_raw"],
+            modality_keys=["vest", "left_arm", "right_arm"],
         ),
         "state": ModalityConfig(
             # current frame + future window for the state-JEPA target (dream_state).

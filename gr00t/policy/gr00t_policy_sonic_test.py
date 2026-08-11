@@ -18,7 +18,7 @@ def make_policy(requires_tactile=True):
         "state": ModalityConfig(list(range(5)), ["state"]),
         "language": ModalityConfig([0], ["task"]),
         "action": ModalityConfig(list(range(40)), ["action"]),
-        "tactile": ModalityConfig(list(range(5)), ["tactile_raw"]),
+        "tactile": ModalityConfig(list(range(5)), ["vest", "left_arm", "right_arm"]),
     }
     return policy
 
@@ -31,7 +31,10 @@ def make_observation():
         },
         "state": {"state": np.zeros((2, 1, 46), dtype=np.float32)},
         "language": {"task": [["carry"], ["carry"]]},
-        "tactile": {"tactile_raw": np.zeros((2, 1, 256), dtype=np.uint8)},
+        "tactile": {
+            key: np.zeros((2, 1, 256), dtype=np.uint8)
+            for key in ("vest", "left_arm", "right_arm")
+        },
     }
 
 
@@ -43,7 +46,7 @@ def test_gr00t_policy_keeps_current_tactile_through_vla_step():
     unbatched = policy._unbatch_observation(observation)
     step = policy._to_vla_step_data(unbatched[0])
 
-    assert step.tactile["tactile_raw"].shape == (1, 256)
+    assert all(step.tactile[key].shape == (1, 256) for key in ("vest", "left_arm", "right_arm"))
 
 
 def test_gr00t_policy_requires_valid_current_tactile_for_tactile_checkpoint():
@@ -54,7 +57,7 @@ def test_gr00t_policy_requires_valid_current_tactile_for_tactile_checkpoint():
         policy.check_observation(observation)
 
     observation = make_observation()
-    observation["tactile"]["tactile_raw"] = np.zeros((2, 5, 256), dtype=np.uint8)
+    observation["tactile"]["left_arm"] = np.zeros((2, 5, 256), dtype=np.uint8)
     with pytest.raises(AssertionError, match="B, 1, 256"):
         policy.check_observation(observation)
 
