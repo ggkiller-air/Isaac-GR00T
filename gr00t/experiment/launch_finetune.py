@@ -163,6 +163,13 @@ if __name__ == "__main__":
     config.training.output_dir = ft_config.output_dir
     config.training.save_steps = ft_config.save_steps
     config.training.save_total_limit = ft_config.save_total_limit
+    config.training.eval_strategy = "steps"
+    config.training.eval_steps = ft_config.eval_steps or ft_config.save_steps
+    config.training.eval_set_split_ratio = ft_config.eval_set_split_ratio
+    config.training.eval_batch_size = ft_config.eval_batch_size
+    config.training.eval_batches = ft_config.eval_batches
+    config.training.save_best_eval_metric_name = "eval_action_mse"
+    config.training.save_best_eval_metric_greater_is_better = False
     config.training.num_gpus = ft_config.num_gpus
     config.training.use_wandb = ft_config.use_wandb
     config.training.max_steps = ft_config.max_steps

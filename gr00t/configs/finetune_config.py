@@ -248,6 +248,18 @@ class FinetuneConfig:
     save_total_limit: int = 5
     """Maximum number of checkpoints to keep before older ones are deleted."""
 
+    eval_steps: int | None = None
+    """Validation interval. Defaults to save_steps for SONIC fine-tuning."""
+
+    eval_set_split_ratio: float = 0.05
+    """Fraction of whole episodes held out for validation."""
+
+    eval_batch_size: int = 2
+    """Per-device validation batch size."""
+
+    eval_batches: int = 8
+    """Maximum number of validation batches across the fixed held-out subset."""
+
     num_gpus: int = 1
     """Number of GPUs available for distributed or single-node training."""
 

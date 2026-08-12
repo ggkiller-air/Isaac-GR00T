@@ -41,6 +41,10 @@ def _make_mock_config():
     config.data.allow_padding = False
     config.data.num_shards_per_epoch = 100
     config.data.override_pretraining_statistics = False
+    config.training.eval_set_split_ratio = 0.05
+    config.training.eval_batches = 8
+    config.training.eval_batch_size = 2
+    config.training.num_gpus = 1
 
     # Single dataset spec
     dataset_spec = MagicMock()
@@ -82,6 +86,8 @@ class TestDatasetFactory:
         mock_dataset.__len__ = MagicMock(return_value=10)
         mock_dataset.shard_lengths = np.full(10, 100)
         mock_dataset.get_shard_length = MagicMock(return_value=100)
+        mock_dataset.episode_indices = {0}
+        mock_dataset.get_effective_episode_length.return_value = 1
         mock_dataset.embodiment_tag = type("ET", (), {"value": "new_embodiment"})()
         mock_dataset.get_dataset_statistics.return_value = {
             "state": {
@@ -118,11 +124,30 @@ class TestDatasetFactory:
         assert train_ds is not None
         assert eval_ds is None
 
-    def test_build_rejects_eval_strategy(self):
+    def test_build_supports_eval_strategy(self):
         from gr00t.data.dataset.factory import DatasetFactory
 
         config = _make_mock_config()
         config.training.eval_strategy = "steps"
         factory = DatasetFactory(config)
-        with pytest.raises(AssertionError, match="does not support evaluation"):
-            factory.build(MagicMock())
+        mock_dataset = MagicMock()
+        mock_dataset.__len__.return_value = 1
+        mock_dataset.shard_lengths = [1]
+        mock_dataset.get_shard_length.return_value = 1
+        mock_dataset.embodiment_tag = type("ET", (), {"value": "new_embodiment"})()
+        mock_dataset.get_dataset_statistics.return_value = {}
+        mock_dataset.episode_indices = {0}
+        mock_dataset.get_effective_episode_length.return_value = 1
+        with (
+            patch("gr00t.data.dataset.factory.generate_stats"),
+            patch("gr00t.data.dataset.factory.generate_rel_stats"),
+            patch("gr00t.data.dataset.factory.barrier"),
+            patch(
+                "gr00t.data.dataset.factory.ShardedSingleStepDataset",
+                return_value=mock_dataset,
+            ),
+            patch("torch.distributed.is_initialized", return_value=False),
+        ):
+            train_ds, eval_ds = factory.build(MagicMock())
+        assert train_ds is not None
+        assert eval_ds is not None

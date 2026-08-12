@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
+
 import numpy as np
 import torch
+from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from gr00t.configs.base_config import Config
@@ -36,13 +39,10 @@ class DatasetFactory:
 
     def build(
         self, processor: BaseProcessor
-    ) -> tuple[ShardedMixtureDataset, ShardedMixtureDataset | None]:
+    ) -> tuple[ShardedMixtureDataset, Dataset | None]:
         """Build the dataset. Returns a tuple of (train_dataset, eval_dataset)."""
-        assert self.config.training.eval_strategy == "no", (
-            "Sharded dataset does not support evaluation sets"
-        )
-
         all_datasets = []
+        all_eval_datasets = []
         all_weights = []
         for dataset_spec in tqdm(
             self.config.data.datasets,
@@ -62,6 +62,25 @@ class DatasetFactory:
                     generate_stats(dataset_path)
                     generate_rel_stats(dataset_path, EmbodimentTag(embodiment_tag))
                 barrier()
+                train_episode_indices = None
+                val_episode_indices = None
+                if self.config.training.eval_strategy != "no":
+                    episodes_path = Path(dataset_path) / "meta" / "episodes.jsonl"
+                    if episodes_path.is_file():
+                        with episodes_path.open() as handle:
+                            episode_count = sum(1 for line in handle if line.strip())
+                    else:
+                        episode_count = 2
+                    if episode_count < 2:
+                        raise ValueError("best-model validation requires at least two episodes")
+                    shuffled = np.arange(episode_count)
+                    np.random.default_rng(self.config.data.seed).shuffle(shuffled)
+                    val_count = min(
+                        episode_count - 1,
+                        max(1, round(episode_count * self.config.training.eval_set_split_ratio)),
+                    )
+                    val_episode_indices = set(shuffled[:val_count].tolist())
+                    train_episode_indices = set(shuffled[val_count:].tolist())
                 dataset = ShardedSingleStepDataset(
                     dataset_path=dataset_path,
                     embodiment_tag=EmbodimentTag(embodiment_tag),
@@ -71,8 +90,22 @@ class DatasetFactory:
                     episode_sampling_rate=self.config.data.episode_sampling_rate,
                     seed=self.config.data.seed,
                     allow_padding=self.config.data.allow_padding,
+                    episode_indices=train_episode_indices,
                 )
                 datasets.append(dataset)
+                if val_episode_indices is not None:
+                    eval_dataset = ShardedSingleStepDataset(
+                        dataset_path=dataset_path,
+                        embodiment_tag=EmbodimentTag(embodiment_tag),
+                        modality_configs=self.config.data.modality_configs[embodiment_tag],
+                        video_backend=self.config.data.video_backend,
+                        shard_size=self.config.data.shard_size,
+                        episode_sampling_rate=1.0,
+                        seed=self.config.data.seed,
+                        allow_padding=self.config.data.allow_padding,
+                        episode_indices=val_episode_indices,
+                    )
+                    all_eval_datasets.append(eval_dataset)
             dataset_lengths = np.array([len(dataset) for dataset in datasets])
             dataset_relative_lengths = dataset_lengths / dataset_lengths.sum()
             for dataset, relative_length in zip(datasets, dataset_relative_lengths):
@@ -80,15 +113,53 @@ class DatasetFactory:
                 all_datasets.append(dataset)
                 all_weights.append(weight)
 
-        return (
-            ShardedMixtureDataset(
-                datasets=all_datasets,
-                weights=all_weights,
-                processor=processor,
-                seed=self.config.data.seed,
-                training=True,
-                num_shards_per_epoch=self.config.data.num_shards_per_epoch,
-                override_pretraining_statistics=self.config.data.override_pretraining_statistics,
-            ),
-            None,
+        train_mixture = ShardedMixtureDataset(
+            datasets=all_datasets,
+            weights=all_weights,
+            processor=processor,
+            seed=self.config.data.seed,
+            training=True,
+            num_shards_per_epoch=self.config.data.num_shards_per_epoch,
+            override_pretraining_statistics=self.config.data.override_pretraining_statistics,
         )
+        if not all_eval_datasets:
+            return train_mixture, None
+        for dataset in all_eval_datasets:
+            dataset.set_processor(processor)
+        max_eval_samples = (
+            self.config.training.eval_batches
+            * self.config.training.eval_batch_size
+            * self.config.training.num_gpus
+        )
+        return train_mixture, FixedValidationDataset(all_eval_datasets, max_eval_samples)
+
+
+class FixedValidationDataset(Dataset):
+    """A deterministic, finite set of held-out episode steps."""
+
+    def __init__(self, datasets: list[ShardedSingleStepDataset], max_samples: int):
+        references = []
+        for dataset_index, dataset in enumerate(datasets):
+            for episode_index in sorted(dataset.episode_indices or ()):
+                for step_index in range(dataset.get_effective_episode_length(episode_index)):
+                    references.append((dataset_index, episode_index, step_index))
+        if not references:
+            raise ValueError("validation episode split contains no complete action windows")
+        if len(references) > max_samples:
+            selected = np.linspace(0, len(references) - 1, max_samples, dtype=int)
+            references = [references[index] for index in selected]
+        self.datasets = datasets
+        self.references = references
+        self._cached_episode_key = None
+        self._cached_episode = None
+
+    def __len__(self):
+        return len(self.references)
+
+    def __getitem__(self, index):
+        dataset_index, episode_index, step_index = self.references[index]
+        key = (dataset_index, episode_index)
+        if key != self._cached_episode_key:
+            self._cached_episode = self.datasets[dataset_index].episode_loader[episode_index]
+            self._cached_episode_key = key
+        return self.datasets[dataset_index].get_datapoint(self._cached_episode, step_index)

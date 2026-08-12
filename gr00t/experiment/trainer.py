@@ -262,6 +262,49 @@ class Gr00tTrainer(Trainer):
 
         return torch.utils.data.DataLoader(self.train_dataset, **dataloader_params)
 
+    def prediction_step(
+        self,
+        model,
+        inputs,
+        prediction_loss_only,
+        ignore_keys=None,
+    ):
+        """Use deterministic generated-action MSE for held-out validation."""
+        del prediction_loss_only, ignore_keys
+        inputs = self._prepare_inputs(inputs)
+        target = inputs["action"]
+        mask = inputs["action_mask"].to(dtype=target.dtype)
+        inference_inputs = {
+            key: value
+            for key, value in inputs.items()
+            if key
+            not in {
+                "action",
+                "action_mask",
+                "future_pixel_values",
+                "future_image_grid_thw",
+                "vision_target",
+            }
+        }
+        unwrapped_model = self.accelerator.unwrap_model(model)
+        state_history = unwrapped_model.action_head.config.state_history_length
+        if "state" in inference_inputs:
+            inference_inputs["state"] = inference_inputs["state"][:, :state_history]
+        if "tactile" in inference_inputs and inference_inputs["tactile"].dim() == 3:
+            inference_inputs["tactile"] = inference_inputs["tactile"][:, :1]
+        devices = [target.device.index] if target.is_cuda and target.device.index is not None else []
+        with torch.no_grad(), torch.random.fork_rng(devices=devices):
+            torch.manual_seed(self.args.seed + 10_000)
+            prediction = unwrapped_model.get_action(inference_inputs)["action_pred"].to(target.dtype)
+        mse = ((prediction - target).square() * mask).sum() / mask.sum().clamp_min(1)
+        return mse.detach(), None, None
+
+    def evaluation_loop(self, *args, **kwargs):
+        output = super().evaluation_loop(*args, **kwargs)
+        if "eval_loss" in output.metrics:
+            output.metrics["eval_action_mse"] = output.metrics.pop("eval_loss")
+        return output
+
     def train(
         self,
         resume_from_checkpoint=None,

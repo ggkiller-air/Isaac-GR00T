@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from pathlib import Path
+import json
 import shutil
 
 from transformers import TrainerCallback
@@ -98,19 +99,29 @@ class BestMetricCheckpointCallback(TrainerCallback):
         if state.is_world_process_zero and metrics is not None:
             current_metric = metrics.get(self.metric_name, None)
             if current_metric is not None:
+                best_checkpoint_dir = Path(args.output_dir) / "best_model"
+                metrics_path = best_checkpoint_dir / "metrics.json"
+                if self._best_checkpoint_dir is None and metrics_path.is_file():
+                    with metrics_path.open() as handle:
+                        saved_metrics = json.load(handle)
+                    self.best_metric = float(saved_metrics[self.metric_name])
+                    self._best_checkpoint_dir = str(best_checkpoint_dir)
                 is_better = (
-                    self.greater_is_better
-                    if current_metric > self.best_metric
-                    else not self.greater_is_better
+                    current_metric > self.best_metric
+                    if self.greater_is_better
+                    else current_metric < self.best_metric
                 )
                 if is_better:
                     self.best_metric = current_metric
-                    best_checkpoint_dir = (
-                        Path(args.output_dir)
-                        / f"checkpoint-{state.global_step}-best-{self.metric_name}_{current_metric}"
-                    )
                     best_checkpoint_dir.mkdir(exist_ok=True)
                     model.save_pretrained(best_checkpoint_dir)
+                    with (best_checkpoint_dir / "metrics.json").open("w") as handle:
+                        json.dump(
+                            {"step": state.global_step, self.metric_name: current_metric},
+                            handle,
+                            indent=2,
+                        )
+                        handle.write("\n")
                     # Copy experiment config directory if provided
                     if self.exp_cfg_dir is not None:
                         exp_cfg_dst = best_checkpoint_dir / self.exp_cfg_dir.name
@@ -123,11 +134,5 @@ class BestMetricCheckpointCallback(TrainerCallback):
                     print(
                         f"Best checkpoint saved to {best_checkpoint_dir} with metric {self.metric_name} = {current_metric}"
                     )
-
-                    if (
-                        self._best_checkpoint_dir is not None
-                        and Path(self._best_checkpoint_dir).exists()
-                    ):
-                        shutil.rmtree(self._best_checkpoint_dir)
 
                     self._best_checkpoint_dir = str(best_checkpoint_dir)
