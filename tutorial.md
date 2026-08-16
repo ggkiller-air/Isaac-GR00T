@@ -1,17 +1,21 @@
 # Isaac-GR00T SONIC tactile training
 
 This branch provides three comparable modes from one codebase. Future observations are
-training-only targets; inference always conditions on the current state, current stereo pair,
-prompt, and (for HTD/JEPA) current tactile packet.
+training-only targets. JEPA conditions on a rolling four-frame tactile history; HTD conditions
+on the current tactile frame only.
 
-| `--tactile-mode` | Current tactile | Future tactile | Future state | Future stereo |
-|---|---:|---:|---:|---:|
-| `notactile` | no | no | no | no |
-| `htd` | yes | yes | no | no |
-| `jepa` (UniVLaT/JEPA) | yes | yes | yes | yes |
+| `--tactile-mode` | Tactile condition | Future targets | Target representation |
+|---|---|---|---|
+| `notactile` | none | none | none |
+| `htd` | current frame | tactile | absolute latent |
+| `jepa` (UniVLaT/JEPA) | four-frame history | tactile, state, stereo | future minus current latent |
 
 The old `--use-tactile {notac,input,dream}`, `--dream-state`, and `--dream-vision`
 flags remain supported when `--tactile-mode` is omitted.
+
+The JEPA training window is `[-3,-2,-1,0,1,2,3,4]`. Only `[-3..0]` enters the policy;
+`[1..4]` is teacher-only. At episode and deployment starts, the first observed tactile frame is
+repeated to fill missing history. `Gr00tPolicy.reset()` clears this rolling history.
 
 HTD is short for *Humanoid Transformer with Touch Dreaming* (arXiv:2604.13015). In this
 port, HTD mode names the current-tactile fusion and future-tactile latent objective; it is

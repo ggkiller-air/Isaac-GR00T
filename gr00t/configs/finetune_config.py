@@ -28,12 +28,14 @@ class TactileModeSettings:
     use_tactile: Literal["dream", "input", "notac"]
     dream_state: bool
     dream_vision: bool
+    use_tactile_temporal: bool
+    use_delta_targets: bool
 
 
 NAMED_TACTILE_MODES: dict[NamedTactileMode, TactileModeSettings] = {
-    "notactile": TactileModeSettings("notac", False, False),
-    "htd": TactileModeSettings("dream", False, False),
-    "jepa": TactileModeSettings("dream", True, True),
+    "notactile": TactileModeSettings("notac", False, False, False, False),
+    "htd": TactileModeSettings("dream", False, False, False, False),
+    "jepa": TactileModeSettings("dream", True, True, True, True),
 }
 
 
@@ -43,12 +45,20 @@ def resolve_tactile_mode(
     use_tactile: Literal["dream", "input", "notac"],
     dream_state: bool,
     dream_vision: bool,
+    use_tactile_temporal: bool = False,
+    use_delta_targets: bool = False,
 ) -> TactileModeSettings:
     """Resolve a fixed named mode, falling back to the legacy independent switches."""
 
     if tactile_mode is not None:
         return NAMED_TACTILE_MODES[tactile_mode]
-    return TactileModeSettings(use_tactile, dream_state, dream_vision)
+    return TactileModeSettings(
+        use_tactile,
+        dream_state,
+        dream_vision,
+        use_tactile_temporal,
+        use_delta_targets,
+    )
 
 
 def configure_tactile_data_windows(
@@ -57,16 +67,24 @@ def configure_tactile_data_windows(
     *,
     dream_horizon: int,
     vision_horizon: int,
+    tactile_history_length: int = 1,
 ) -> None:
     """Load future observations only for auxiliary targets enabled by ``settings``."""
 
+    if dream_horizon < 1:
+        raise ValueError("dream_horizon must be at least 1")
+    if vision_horizon < 1:
+        raise ValueError("vision_horizon must be at least 1")
     if settings.use_tactile == "notac":
         modality_config.pop("tactile", None)
     else:
         if "tactile" not in modality_config:
             raise ValueError("The selected tactile mode requires a tactile modality")
-        tactile_horizon = dream_horizon + 1 if settings.use_tactile == "dream" else 1
-        modality_config["tactile"].delta_indices = list(range(tactile_horizon))
+        if settings.use_tactile_temporal and tactile_history_length < 2:
+            raise ValueError("temporal tactile encoding requires tactile_history_length >= 2")
+        history = tactile_history_length if settings.use_tactile_temporal else 1
+        future = dream_horizon if settings.use_tactile == "dream" else 0
+        modality_config["tactile"].delta_indices = list(range(1 - history, future + 1))
 
     dream_enabled = settings.use_tactile == "dream"
     modality_config["state"].delta_indices = (
@@ -121,7 +139,7 @@ class FinetuneConfig:
     """Fixed experiment mode for comparable runs:
       - "notactile": no tactile input and no auxiliary future targets.
       - "htd": current tactile input plus future-tactile dreaming only.
-      - "jepa": HTD plus future-state and future-stereo-vision JEPA targets.
+      - "jepa": HTD plus tactile temporal encoding and delta future tactile/state/vision targets.
 
     When omitted, the legacy ``use_tactile``, ``dream_state``, and ``dream_vision``
     switches below remain fully supported. When set, this mode is authoritative."""
@@ -149,6 +167,18 @@ class FinetuneConfig:
       - "coord": "cnn" plus CoordConv row/col position channels, so the pooled CNN
         can encode where in a region a contact lands.
     Switching requires retraining (new params); "mlp" keeps prior runs unchanged."""
+
+    use_tactile_temporal: bool = False
+    """Encode a causal tactile history window before DiT fusion. Named ``jepa`` enables it."""
+
+    tactile_history_length: int = 4
+    """Number of past-to-current tactile frames used by the temporal encoder."""
+
+    use_delta_targets: bool = False
+    """Predict future teacher latents relative to the corresponding current latent."""
+
+    tactile_token_chunk_targets: bool = False
+    """Predict the complete future tactile slot-token chunk instead of pooled latents."""
 
     dream_state: bool = False
     """State-JEPA branch (only meaningful with use_tactile="dream"). When True, the

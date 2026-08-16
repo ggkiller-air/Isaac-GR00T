@@ -179,10 +179,13 @@ def run(config: Config):
 
         wandb.init(
             project=config.training.wandb_project,
-            name=experiment_name,
+            name=f"Isaac-GR00T / {experiment_name}",
+            group="sonic-htd-model-comparison",
+            job_type="comparison-training",
             config=config_dict,
             tags=[config.data.mode],
         )
+        wandb.define_metric("comparison/*", step_metric="comparison/step")
 
     # Setup model training pipeline.
     pipeline = MODEL_REGISTRY.get(type(config.model))(config, save_cfg_dir)

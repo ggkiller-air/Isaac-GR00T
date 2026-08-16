@@ -39,6 +39,7 @@ import torch
 from transformers.trainer import TRAINER_STATE_NAME, Trainer, TrainerState, get_last_checkpoint
 from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalPrediction
+import wandb
 
 
 class ProfCallback(TrainerCallback):
@@ -205,18 +206,43 @@ class Gr00tTrainer(Trainer):
         """
         self.action_offset = kwargs.pop("action_offset", None)
         self.multiprocessing_context = kwargs.pop("multiprocessing_context", "fork")
+        self._initial_checkpoint_saved = False
         super().__init__(
             *args,
             **kwargs,
             # compute_metrics=partial(compute_eval_accuracy, action_offset=self.action_offset),
         )
 
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        """Exercise the real checkpoint path before the first optimizer step."""
+        if not self._initial_checkpoint_saved:
+            if self.state.global_step == 0:
+                logging.info("Saving step-0 smoke checkpoint before training")
+                self._save_checkpoint(model, trial=None)
+                self.control = self.callback_handler.on_save(
+                    self.args, self.state, self.control
+                )
+            self._initial_checkpoint_saved = True
+        return super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
+
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         # Hide epoch from logged metrics as it's misleading for Iterable datasets.
+        aliases = {
+            "comparison/step": self.state.global_step,
+            "comparison/loss": logs.get("loss"),
+            "comparison/action_loss": logs.get("action_loss"),
+            "comparison/tactile_loss": logs.get("tactile_loss"),
+            "comparison/vision_loss": logs.get("vision_jepa_loss"),
+            "comparison/lr": logs.get("learning_rate"),
+            "val/action_mse": logs.get("eval_action_mse"),
+        }
+        comparison_logs = {key: value for key, value in aliases.items() if value is not None}
         epoch = self.state.epoch
         self.state.epoch = None
         super().log(logs, start_time=start_time)
         self.state.epoch = epoch
+        if self.is_world_process_zero() and wandb.run is not None and comparison_logs:
+            wandb.log(comparison_logs)
 
     def get_train_dataloader(self):  # noqa: D401
         """Return a iterable dataloader without skipping the data during resume, but reseed the dataset instead."""
@@ -323,6 +349,7 @@ class Gr00tTrainer(Trainer):
 
         if resume_from_checkpoint is not None:
             logging.info(f"Resuming from checkpoint {resume_from_checkpoint}")
+            self._initial_checkpoint_saved = True
             # In case of repeating the find_executable_batch_size, set `self._train_batch_size` properly
             self.state = TrainerState.load_from_json(
                 os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)

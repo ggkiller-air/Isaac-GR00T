@@ -33,8 +33,10 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
 from gr00t.model.modules.tactile_encoder import (
     TactileDreamHead,
     TactileEncoder,
+    TactileTemporalEncoder,
     build_ema_teacher,
     ema_update,
+    latent_prediction_target,
     touch_dreaming_loss,
 )
 
@@ -137,6 +139,14 @@ class Gr00tN1d7ActionHead(nn.Module):
             self.lambda_tactile = config.lambda_tactile
             self.tactile_dream_beta = config.tactile_dream_beta
             self.n_tactile_tokens = config.n_tactile_tokens
+            self.use_tactile_temporal = getattr(config, "use_tactile_temporal", False)
+            self.tactile_history_length = (
+                getattr(config, "tactile_history_length", 4) if self.use_tactile_temporal else 1
+            )
+            self.use_delta_targets = getattr(config, "use_delta_targets", False)
+            self.tactile_token_chunk_targets = getattr(
+                config, "tactile_token_chunk_targets", False
+            )
             self.tactile_encoder = TactileEncoder(
                 raw_dim=config.tactile_raw_dim,
                 valid_idx=tactile_valid_idx,
@@ -151,6 +161,14 @@ class Gr00tN1d7ActionHead(nn.Module):
                 cnn_coord=getattr(config, "tactile_cnn_coord", False),
                 cnn_coord_scale=getattr(config, "tactile_cnn_coord_scale", 1.0),
             )
+            if self.use_tactile_temporal:
+                self.tactile_temporal_encoder = TactileTemporalEncoder(
+                    embed_dim=self.input_embedding_dim,
+                    hidden_dim=config.tactile_hidden_dim,
+                    history_length=self.tactile_history_length,
+                    num_layers=getattr(config, "tactile_temporal_layers", 1),
+                    num_heads=getattr(config, "tactile_temporal_heads", 8),
+                )
             # Touch-dreaming graft (EMA target encoder + dream head + L_tact). Gated
             # by `use_tactile_dream`: False = ablation control group where tactile is
             # injected into sa_embs as a plain input only, with no dream modules built.
@@ -162,7 +180,11 @@ class Gr00tN1d7ActionHead(nn.Module):
                 self.tactile_target_encoder = build_ema_teacher(self.tactile_encoder)
                 self.tactile_dream_head = TactileDreamHead(
                     in_dim=self.hidden_size,
-                    latent_dim=self.input_embedding_dim,
+                    latent_dim=(
+                        self.input_embedding_dim * self.n_tactile_tokens
+                        if self.tactile_token_chunk_targets
+                        else self.input_embedding_dim
+                    ),
                     dream_horizon=config.dream_horizon,
                     hidden_dim=config.tactile_hidden_dim,
                 )
@@ -243,6 +265,8 @@ class Gr00tN1d7ActionHead(nn.Module):
                     self.state_target_encoder.requires_grad_(False)
             if not tune_tactile:
                 self.tactile_encoder.requires_grad_(False)
+                if getattr(self, "use_tactile_temporal", False):
+                    self.tactile_temporal_encoder.requires_grad_(False)
                 if getattr(self, "use_tactile_dream", False):
                     self.tactile_dream_head.requires_grad_(False)
                     if getattr(self, "dream_state", False):
@@ -286,6 +310,8 @@ class Gr00tN1d7ActionHead(nn.Module):
                         self.state_target_encoder.eval()
                 if not getattr(self, "tune_tactile", True):
                     self.tactile_encoder.eval()
+                    if getattr(self, "use_tactile_temporal", False):
+                        self.tactile_temporal_encoder.eval()
                     if getattr(self, "use_tactile_dream", False):
                         self.tactile_dream_head.eval()
                         if getattr(self, "dream_state", False):
@@ -296,7 +322,7 @@ class Gr00tN1d7ActionHead(nn.Module):
     def _tactile_features(
         self, action_input: BatchFeature, batch_size: int, device
     ) -> torch.Tensor:
-        """Encode the current-frame tactile packet into ``[B, n_tactile_tokens, emb]``.
+        """Encode tactile history into current-time ``[B, n_tactile_tokens, emb]`` tokens.
 
         Accepts tactile as ``[B, T, raw_dim]`` (windowed training input) or
         ``[B, raw_dim]`` (single-step inference). Falls back to zeros when tactile
@@ -308,9 +334,34 @@ class Gr00tN1d7ActionHead(nn.Module):
             current = torch.zeros(
                 batch_size, self.config.tactile_raw_dim, device=device, dtype=dtype
             )
+            if self.use_tactile_temporal:
+                tokens = self.tactile_encoder(current)
+                tokens = tokens[:, None].expand(-1, self.tactile_history_length, -1, -1)
+                return self.tactile_temporal_encoder(tokens)
         elif tactile_raw.dim() == 3:
-            current = tactile_raw[:, 0]
+            history = tactile_raw[:, : self.tactile_history_length]
+            if history.shape[1] < self.tactile_history_length:
+                history = torch.cat(
+                    [
+                        history[:, :1].expand(
+                            -1, self.tactile_history_length - history.shape[1], -1
+                        ),
+                        history,
+                    ],
+                    dim=1,
+                )
+            if self.use_tactile_temporal:
+                batch, steps, raw_dim = history.shape
+                tokens = self.tactile_encoder(history.reshape(batch * steps, raw_dim))
+                return self.tactile_temporal_encoder(
+                    tokens.reshape(batch, steps, self.n_tactile_tokens, -1)
+                )
+            current = history[:, -1]
         else:
+            if self.use_tactile_temporal:
+                tokens = self.tactile_encoder(tactile_raw)
+                tokens = tokens[:, None].expand(-1, self.tactile_history_length, -1, -1)
+                return self.tactile_temporal_encoder(tokens)
             current = tactile_raw
         return self.tactile_encoder(current)
 
@@ -464,10 +515,20 @@ class Gr00tN1d7ActionHead(nn.Module):
         # move the EMA step into a trainer callback fired on optimizer steps.
         if self.use_tactile and self.use_tactile_dream and self.training:
             tactile_raw = getattr(action_input, "tactile", None)
+            expected_tactile_steps = self.tactile_history_length + self.dream_horizon
+            if (
+                tactile_raw is None
+                or tactile_raw.dim() != 3
+                or tactile_raw.shape[1] < expected_tactile_steps
+            ):
+                shape = None if tactile_raw is None else tuple(tactile_raw.shape)
+                raise ValueError(
+                    f"touch dreaming requires tactile [B,{expected_tactile_steps},D], got {shape}"
+                )
             if (
                 tactile_raw is not None
                 and tactile_raw.dim() == 3
-                and tactile_raw.shape[1] >= self.dream_horizon + 1
+                and tactile_raw.shape[1] >= expected_tactile_steps
             ):
                 # Shared post-DiT tactile trunk: pooled over the tactile token
                 # positions [1 : 1 + N]. Every JEPA predictor head reads this.
@@ -478,11 +539,33 @@ class Gr00tN1d7ActionHead(nn.Module):
 
                 # --- Tactile branch (HTD touch-dreaming): predict future tactile. ---
                 ema_update(self.tactile_target_encoder, self.tactile_encoder, self.ema_decay)
-                future_raw = tactile_raw[:, 1 : 1 + tau]
+                current_index = self.tactile_history_length - 1
+                future_raw = tactile_raw[:, current_index + 1 : current_index + 1 + tau]
                 with torch.no_grad():
-                    target_latent = self.tactile_target_encoder.encode_pooled(future_raw)
+                    if self.tactile_token_chunk_targets:
+                        future_batch, future_steps, future_width = future_raw.shape
+                        target_tokens = self.tactile_target_encoder(
+                            future_raw.reshape(future_batch * future_steps, future_width)
+                        )
+                        target_latent = target_tokens.reshape(
+                            future_batch, future_steps, -1
+                        )
+                    else:
+                        target_latent = self.tactile_target_encoder.encode_pooled(future_raw)
+                    if self.use_delta_targets:
+                        current_latent = self.tactile_target_encoder.encode_pooled(
+                            tactile_raw[:, current_index]
+                        )
+                        target_latent = latent_prediction_target(
+                            target_latent, current_latent, True
+                        )
                 dream_pred = self.tactile_dream_head(tactile_trunk)
-                assert dream_pred.shape == (B, tau, D_emb), dream_pred.shape
+                target_width = (
+                    D_emb * self.n_tactile_tokens
+                    if self.tactile_token_chunk_targets
+                    else D_emb
+                )
+                assert dream_pred.shape == (B, tau, target_width), dream_pred.shape
                 tactile_loss = touch_dreaming_loss(
                     dream_pred, target_latent, self.tactile_dream_beta
                 )
@@ -499,6 +582,13 @@ class Gr00tN1d7ActionHead(nn.Module):
                     ema_update(self.state_target_encoder, self.state_encoder, self.ema_decay)
                     with torch.no_grad():
                         target_state = self.state_target_encoder(state_future, embodiment_id)
+                        if self.use_delta_targets:
+                            current_state = self.state_target_encoder(
+                                state_seq[:, :1], embodiment_id
+                            )
+                            target_state = latent_prediction_target(
+                                target_state, current_state, True
+                            )
                     pred_state = self.state_dream_head(tactile_trunk)
                     assert pred_state.shape == (B, tau, D_emb), pred_state.shape
                     assert target_state.shape == (B, tau, D_emb), target_state.shape
@@ -520,6 +610,13 @@ class Gr00tN1d7ActionHead(nn.Module):
                             "future frames (widen the video modality delta_indices)."
                         )
                     vh = self.vision_horizon
+                    if self.use_delta_targets:
+                        vision_current = getattr(action_input, "vision_current", None)
+                        if vision_current is None:
+                            raise ValueError("delta vision targets require vision_current")
+                        vision_target = latent_prediction_target(
+                            vision_target, vision_current, True
+                        )
                     pred_vision = self.vision_dream_head(tactile_trunk)
                     assert pred_vision.shape == (B, vh, vision_target.shape[-1]), (
                         pred_vision.shape,
@@ -845,8 +942,15 @@ class Gr00tN1d7(PreTrainedModel):
         return backbone_inputs, action_inputs
 
     @torch.no_grad()
-    def _compute_vision_target(self, backbone_inputs: BatchFeature) -> torch.Tensor:
-        """Encode the future frames with the frozen vision tower into JEPA targets.
+    def _compute_vision_latents(
+        self,
+        backbone_inputs: BatchFeature,
+        *,
+        pixel_key: str,
+        grid_key: str,
+        horizon: int,
+    ) -> torch.Tensor:
+        """Encode current or future frames with the frozen vision tower.
 
         The collator stacks per-sample future frames sample-major, frame-outer /
         view-inner, into ``future_pixel_values`` (+ ``future_image_grid_thw``). We run
@@ -855,8 +959,8 @@ class Gr00tN1d7(PreTrainedModel):
         Frozen teacher -> no EMA, no gradient; the action head detaches again.
         """
         visual = self.backbone.model.visual
-        fpv = backbone_inputs["future_pixel_values"]
-        fthw = backbone_inputs["future_image_grid_thw"]
+        fpv = backbone_inputs[pixel_key]
+        fthw = backbone_inputs[grid_key]
         # Qwen3-VL vision tower returns (hidden_states, deepstack_feature_lists);
         # we only need the merged patch tokens. [sum_merged_tokens, D_vis]
         embeds = visual(fpv, fthw)[0]
@@ -866,11 +970,26 @@ class Gr00tN1d7(PreTrainedModel):
             [chunk.mean(dim=0) for chunk in embeds.split(counts, dim=0)], dim=0
         )  # [num_imgs, D_vis]
         B = backbone_inputs["input_ids"].shape[0]
-        vh = self.config.vision_horizon
         num_imgs = pooled.shape[0]
-        assert num_imgs % (B * vh) == 0, (num_imgs, B, vh)
-        num_views = num_imgs // (B * vh)
-        return pooled.view(B, vh, num_views, pooled.shape[-1]).mean(dim=2)  # [B, vh, D_vis]
+        assert num_imgs % (B * horizon) == 0, (num_imgs, B, horizon)
+        num_views = num_imgs // (B * horizon)
+        return pooled.view(B, horizon, num_views, pooled.shape[-1]).mean(dim=2)
+
+    def _compute_vision_target(self, backbone_inputs: BatchFeature) -> torch.Tensor:
+        return self._compute_vision_latents(
+            backbone_inputs,
+            pixel_key="future_pixel_values",
+            grid_key="future_image_grid_thw",
+            horizon=self.config.vision_horizon,
+        )
+
+    def _compute_current_vision_latent(self, backbone_inputs: BatchFeature) -> torch.Tensor:
+        return self._compute_vision_latents(
+            backbone_inputs,
+            pixel_key="pixel_values",
+            grid_key="image_grid_thw",
+            horizon=1,
+        )[:, 0]
 
     def forward(self, inputs: dict) -> BatchFeature:
         """
@@ -891,6 +1010,10 @@ class Gr00tN1d7(PreTrainedModel):
         # future_pixel_values, so this is skipped and the action output is unchanged.
         if getattr(self.config, "dream_vision", False) and "future_pixel_values" in backbone_inputs:
             action_inputs["vision_target"] = self._compute_vision_target(backbone_inputs)
+            if getattr(self.config, "use_delta_targets", False):
+                action_inputs["vision_current"] = self._compute_current_vision_latent(
+                    backbone_inputs
+                )
         action_outputs = self.action_head(backbone_outputs, action_inputs)
 
         return action_outputs

@@ -104,6 +104,14 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 use_tactile_dream=getattr(self.config.model, "use_tactile_dream", True),
                 tactile_encoder_type=getattr(self.config.model, "tactile_encoder_type", "mlp"),
                 tactile_cnn_coord=getattr(self.config.model, "tactile_cnn_coord", False),
+                use_tactile_temporal=getattr(self.config.model, "use_tactile_temporal", False),
+                tactile_history_length=getattr(self.config.model, "tactile_history_length", 4),
+                tactile_temporal_layers=getattr(self.config.model, "tactile_temporal_layers", 1),
+                tactile_temporal_heads=getattr(self.config.model, "tactile_temporal_heads", 8),
+                use_delta_targets=getattr(self.config.model, "use_delta_targets", False),
+                tactile_token_chunk_targets=getattr(
+                    self.config.model, "tactile_token_chunk_targets", False
+                ),
                 dream_state=getattr(self.config.model, "dream_state", False),
                 lambda_state=getattr(self.config.model, "lambda_state", 0.5),
                 dream_vision=getattr(self.config.model, "dream_vision", False),
@@ -143,9 +151,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 "target_encoder",
             )
             other_missing = [
-                k
-                for k in missing_keys
-                if not any(s in k for s in fresh_init_substrings)
+                k for k in missing_keys if not any(s in k for s in fresh_init_substrings)
             ]
             errors = []
             if other_missing:
@@ -167,9 +173,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
             # pre-load (random) weights and diverge from the loaded online
             # encoder. Re-sync target <- online so JEPA targets start matched.
             action_head = getattr(model, "action_head", None)
-            if action_head is not None and getattr(
-                action_head, "use_tactile_dream", False
-            ):
+            if action_head is not None and getattr(action_head, "use_tactile_dream", False):
                 with torch.no_grad():
                     if getattr(action_head, "dream_state", False) and hasattr(
                         action_head, "state_target_encoder"
@@ -177,9 +181,7 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                         action_head.state_target_encoder.load_state_dict(
                             action_head.state_encoder.state_dict()
                         )
-                        logging.info(
-                            "state_target_encoder re-synced from loaded state_encoder"
-                        )
+                        logging.info("state_target_encoder re-synced from loaded state_encoder")
                     if hasattr(action_head, "tactile_target_encoder"):
                         action_head.tactile_target_encoder.load_state_dict(
                             action_head.tactile_encoder.state_dict()

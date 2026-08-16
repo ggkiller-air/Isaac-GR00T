@@ -88,6 +88,8 @@ if __name__ == "__main__":
         use_tactile=ft_config.use_tactile,
         dream_state=ft_config.dream_state,
         dream_vision=ft_config.dream_vision,
+        use_tactile_temporal=ft_config.use_tactile_temporal,
+        use_delta_targets=ft_config.use_delta_targets,
     )
     if ft_config.tactile_mode is not None:
         print(f"[launch_finetune] Using fixed tactile mode: {ft_config.tactile_mode}")
@@ -104,6 +106,14 @@ if __name__ == "__main__":
         tactile_settings.use_tactile
     ]
     config.model.tune_tactile = ft_config.tune_tactile
+    config.model.use_tactile_temporal = tactile_settings.use_tactile_temporal
+    config.model.tactile_history_length = ft_config.tactile_history_length
+    config.model.use_delta_targets = tactile_settings.use_delta_targets
+    config.model.tactile_token_chunk_targets = ft_config.tactile_token_chunk_targets
+    if config.model.tactile_token_chunk_targets and tactile_settings.use_tactile != "dream":
+        raise ValueError("tactile token chunk targets require use_tactile='dream'")
+    if config.model.tactile_token_chunk_targets and tactile_settings.use_delta_targets:
+        raise ValueError("token chunk ablation uses absolute targets, not delta targets")
     # State-JEPA branch rides on the touch-dreaming trunk, so it only applies in
     # "dream" mode. Silently ignore (with a warning) otherwise to avoid a no-op build.
     config.model.dream_state = (
@@ -119,6 +129,8 @@ if __name__ == "__main__":
     config.model.dream_vision = (
         tactile_settings.dream_vision and tactile_settings.use_tactile == "dream"
     )
+    if config.model.dream_vision and ft_config.tune_visual:
+        raise ValueError("vision-JEPA requires tune_visual=False for a frozen vision teacher")
     config.model.lambda_vision = ft_config.lambda_vision
     config.model.vision_horizon = ft_config.vision_horizon
     if tactile_settings.dream_vision and tactile_settings.use_tactile != "dream":
@@ -133,7 +145,10 @@ if __name__ == "__main__":
         tactile_settings,
         dream_horizon=config.model.dream_horizon,
         vision_horizon=config.model.vision_horizon,
+        tactile_history_length=config.model.tactile_history_length,
     )
+    if config.model.use_tactile_temporal:
+        config.data.allow_padding = True
     # "coord" == cnn encoder with CoordConv channels enabled.
     _tactile_enc = {"mlp": ("mlp", False), "cnn": ("cnn", False), "coord": ("cnn", True)}
     config.model.tactile_encoder_type, config.model.tactile_cnn_coord = _tactile_enc[

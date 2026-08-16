@@ -21,7 +21,7 @@ without touching the pretrained VLM+DiT:
 (A) :class:`TactileEncoder` -- per-region MLPs + a learnable-slot cross-attention
     aggregator turn a raw ``uint8[raw_dim]`` skin packet into ``N`` tactile
     tokens of width ``embedding_dim`` (so they can be concatenated into the DiT
-    ``sa_embs`` sequence). It owns the 256->112 valid-channel select and the
+    ``sa_embs`` sequence). It owns the 768->624 valid-channel select and the
     ``/255`` normalization, so the data pipeline only forwards the raw packet.
 (C) :class:`TactileDreamHead` + :func:`touch_dreaming_loss` + an EMA target copy
     of the encoder implement the touch-dreaming auxiliary task: predict the
@@ -51,8 +51,8 @@ class PerRegionTactileEncoder(nn.Module):
     Input is the flat vector of valid channels (region-ordered); it is split by
     ``region_sizes`` and each slice goes through its own 2-layer MLP projecting
     to ``output_dim``. Output: ``[B, num_regions, output_dim]``. No 2D spatial
-    layout is assumed (MLP, not CNN), matching the irregular per-region sensel
-    counts ``[48, 40, 8, 4, 8, 4]``.
+    layout is assumed (MLP, not CNN), matching the per-region sensel counts
+    ``[48, 40, 8, 4, 8, 4, 256, 256]``.
     """
 
     def __init__(self, region_sizes: list[int], hidden_dim: int, output_dim: int):
@@ -280,6 +280,57 @@ class TactileDreamHead(nn.Module):
         return out.view(out.shape[0], self.dream_horizon, self.latent_dim)
 
 
+class TactileTemporalEncoder(nn.Module):
+    """Fuse causal per-frame tactile slot tokens through a bottleneck transformer."""
+
+    def __init__(
+        self,
+        embed_dim: int,
+        hidden_dim: int,
+        history_length: int,
+        num_layers: int = 1,
+        num_heads: int = 8,
+    ):
+        super().__init__()
+        if history_length < 2:
+            raise ValueError("tactile_history_length must be at least 2")
+        if num_layers < 1:
+            raise ValueError("tactile_temporal_layers must be at least 1")
+        if num_heads < 1:
+            raise ValueError("tactile_temporal_heads must be at least 1")
+        if hidden_dim % num_heads != 0:
+            raise ValueError("tactile temporal hidden_dim must be divisible by num_heads")
+        self.history_length = history_length
+        self.input_projection = nn.Linear(embed_dim, hidden_dim)
+        self.time_embedding = nn.Parameter(torch.empty(history_length, hidden_dim))
+        layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim * 2,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(layer, num_layers=num_layers)
+        self.output_projection = nn.Linear(hidden_dim, embed_dim)
+        self.output_norm = nn.LayerNorm(embed_dim)
+        nn.init.normal_(self.time_embedding, mean=0.0, std=0.02)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        if tokens.dim() != 4:
+            raise ValueError(f"expected tactile tokens [B,H,N,D], got {tuple(tokens.shape)}")
+        batch, history, slots, width = tokens.shape
+        if history != self.history_length:
+            raise ValueError(f"expected tactile history {self.history_length}, got {history}")
+        hidden = self.input_projection(tokens).permute(0, 2, 1, 3)
+        hidden = hidden.reshape(batch * slots, history, -1)
+        hidden = hidden + self.time_embedding[None].to(hidden.dtype)
+        hidden = self.transformer(hidden)[:, -1]
+        update = self.output_projection(hidden).reshape(batch, slots, width)
+        return self.output_norm(tokens[:, -1] + update)
+
+
 def touch_dreaming_loss(
     pred: torch.Tensor, target: torch.Tensor, beta: float = 1.0
 ) -> torch.Tensor:
@@ -292,11 +343,24 @@ def touch_dreaming_loss(
     """
     pred = pred.float()
     target = target.float()
-    direction = 1.0 - F.cosine_similarity(pred, target, dim=-1)  # [B, dream_horizon]
+    target_has_direction = target.norm(dim=-1) > 1e-6
+    direction = 1.0 - F.cosine_similarity(pred, target, dim=-1)
+    direction = direction * target_has_direction.to(direction.dtype)
     magnitude = F.smooth_l1_loss(
         pred.norm(dim=-1), target.norm(dim=-1), reduction="none"
     )  # [B, dream_horizon]
     return (direction + beta * magnitude).mean()
+
+
+def latent_prediction_target(
+    future: torch.Tensor, current: torch.Tensor, use_delta: bool
+) -> torch.Tensor:
+    """Return absolute future latents or ``future - current`` in one teacher space."""
+    if not use_delta:
+        return future
+    if current.dim() == future.dim() - 1:
+        current = current.unsqueeze(1)
+    return future - current
 
 
 @torch.no_grad()

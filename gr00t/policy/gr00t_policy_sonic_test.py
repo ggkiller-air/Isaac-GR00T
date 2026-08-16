@@ -32,8 +32,7 @@ def make_observation():
         "state": {"state": np.zeros((2, 1, 46), dtype=np.float32)},
         "language": {"task": [["carry"], ["carry"]]},
         "tactile": {
-            key: np.zeros((2, 1, 256), dtype=np.uint8)
-            for key in ("vest", "left_arm", "right_arm")
+            key: np.zeros((2, 1, 256), dtype=np.uint8) for key in ("vest", "left_arm", "right_arm")
         },
     }
 
@@ -60,6 +59,24 @@ def test_gr00t_policy_requires_valid_current_tactile_for_tactile_checkpoint():
     observation["tactile"]["left_arm"] = np.zeros((2, 5, 256), dtype=np.uint8)
     with pytest.raises(AssertionError, match="B, 1, 256"):
         policy.check_observation(observation)
+
+
+def test_gr00t_policy_rolls_tactile_history_and_reset():
+    policy = make_policy(requires_tactile=True)
+    policy.tactile_history_length = 3
+    policy._tactile_history = None
+    observation = make_observation()
+
+    first = policy._append_tactile_history(observation)
+    assert all(value.shape == (2, 3, 256) for value in first["tactile"].values())
+    observation["tactile"]["vest"][:] = 7
+    second = policy._append_tactile_history(observation)
+    assert np.all(second["tactile"]["vest"][:, -1] == 7)
+    assert np.all(second["tactile"]["vest"][:, 0] == 0)
+    assert observation["tactile"]["vest"].shape == (2, 1, 256)
+
+    policy.reset()
+    assert policy._tactile_history is None
 
 
 def test_bridge_metadata_rejects_incompatible_backend():

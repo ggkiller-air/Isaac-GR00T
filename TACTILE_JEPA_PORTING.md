@@ -9,11 +9,12 @@ vision-JEPA 实验逻辑，作为向 `openpi`、`starVLA`、`DiT4DiT` 迁移时�
 
 用户侧有三个 tactile 模式：
 
-| 模式 | 当前触觉输入 | 未来触觉预测 | state/vision JEPA | 推理额外开销 |
+| 模式 | 触觉条件 | 未来预测 | Target | 推理额外开销 |
 | --- | --- | --- | --- | --- |
 | `notac` | 无 | 无 | 无 | 无 |
-| `input` | 有 | 无 | 无 | tactile encoder |
-| `dream` | 有 | 有 | 可选 | tactile encoder |
+| `input` | 当前帧 | 无 | 无 | tactile encoder |
+| `dream` / HTD | 当前帧 | tactile | absolute latent | tactile encoder |
+| named `jepa` | 4 帧历史 | tactile/state/vision | `z(t+k)-z(t)` | tactile + temporal encoder |
 
 内部开关映射为：
 
@@ -23,17 +24,19 @@ input -> use_tactile=True,  use_tactile_dream=False
 dream -> use_tactile=True,  use_tactile_dream=True
 ```
 
-`dream_state` 和 `dream_vision` 只在 `dream` 模式生效。所有 dream predictor、teacher 和
-辅助损失都只用于训练；部署只保留当前帧 tactile encoder 和 action policy。
+`dream_state` 和 `dream_vision` 只在 `dream` 模式生效。named `jepa` 同时启用 temporal encoder、
+三个 predictor 和 delta target。所有 predictor/teacher 只用于训练；部署保留 tactile encoder、
+temporal encoder 和 action policy。
 
 ## 2. 数据契约
 
 ### 2.1 Tactile
 
-数据列 `observation.tactile_raw` 是 `uint8[256]`。数据管线保持原始数值和通道顺序，
+数据由 `vest`、`left_arm`、`right_arm` 三路 `uint8[256]` 组成，并按该顺序拼成 `uint8[768]`。
+数据管线保持原始数值和通道顺序，
 只负责构造时间窗；有效通道选择和归一化必须在模型 encoder 内完成，以确保 train/infer 一致。
 
-当前 `unitree_g1_sonic` 布局为 112 个有效通道：
+当前 `unitree_g1_sonic` 布局为 624 个有效通道：
 
 | 区域 | 网格 | 通道数 |
 | --- | --- | ---: |
@@ -43,11 +46,13 @@ dream -> use_tactile=True,  use_tactile_dream=True
 | `left_shoulder` | 1 x 4 | 4 |
 | `right_arm` | 2 x 4 | 8 |
 | `right_shoulder` | 1 x 4 | 4 |
+| `left_arm_device` | 16 x 16 | 256 |
+| `right_arm_device` | 16 x 16 | 256 |
 
 通道映射的唯一来源是 `gr00t/data/tactile_layout.py`。其中 spec 索引是 1-based，
-`get_valid_idx()` 输出供 tensor 使用的 0-based 索引。迁移时不要手工重排这 112 个值。
+`get_valid_idx()` 输出供 tensor 使用的 0-based 索引。迁移时不要手工重排这 624 个值。
 
-训练窗口：
+HTD 训练窗口：
 
 ```text
 tactile_raw: [B, 1 + tau, 256]
@@ -58,7 +63,18 @@ index tau:  最后一个未来 target
 ```
 
 当前 `tau = dream_horizon = 4`，因此 modality config 使用 `delta_indices=range(5)`。
-`input` 模式只消费 index 0；当前配置仍会加载未来 4 帧，属于可优化的额外 I/O。
+`input` 模式只加载和消费 index 0。
+
+named `jepa` 的训练窗口为：
+
+```text
+tactile_raw: [B, history + tau, 768]
+delta index:  [-3, -2, -1, 0, 1, 2, 3, 4]
+condition:    前 4 帧（过去到当前）
+target:       后 4 帧（仅 teacher 使用）
+```
+
+episode 左边界用首帧重复 padding。future target 不进入 temporal encoder，因此没有未来信息泄漏。
 
 ### 2.2 State
 
@@ -99,11 +115,11 @@ collator 再按 sample-major 拼接。vision tower 输出按每张图的 merged 
 `TactileEncoder` 的固定顺序是：
 
 ```text
-raw[..., 256]
-  -> select 112 valid channels
+raw[..., 768]
+  -> select 624 valid channels
   -> cast to encoder dtype and divide by 255 once
   -> six independent region encoders
-  -> [B, 6, input_embedding_dim]
+  -> [B, 8, input_embedding_dim]
   -> learnable-slot cross attention
   -> [B, n_tactile_tokens, input_embedding_dim]
 ```
@@ -130,8 +146,12 @@ math backend 的代价很小。
 `encode_pooled()` 对 slot 维取均值，用于 teacher latent：
 
 ```text
-[B, tau, 256] -> [B, tau, 8, 1536] -> [B, tau, 1536]
+[B, tau, 768] -> [B, tau, 8, 1536] -> [B, tau, 1536]
 ```
+
+named `jepa` 对每个历史帧先独立运行 `TactileEncoder`，再按 slot 通过一层 bottleneck
+Transformer 融合时间维，最后只输出当前时刻的 8 个 slot token。默认历史长度 4、hidden width
+512、8 heads。Transformer 只看到过去到当前，不使用 future target。
 
 ## 4. Policy Fusion
 
@@ -142,9 +162,9 @@ state token(s) | tactile slot tokens | noised action tokens
       1        |          8          |         40
 ```
 
-训练和推理使用完全相同的当前帧 tactile encoder。tactile token 放在 action token 之前，action
-decoder 始终取输出序列最后 `action_horizon` 个 token，因此增加 tactile token 不改变 action
-输出的索引和形状。
+训练和推理使用相同的 tactile/temporal encoder。在线推理由 `Gr00tPolicy` 维护滚动历史，首帧重复
+填充，`reset()` 清空。tactile token 放在 action token 之前，action decoder 始终取输出序列最后
+`action_horizon` 个 token，因此增加 tactile token 不改变 action 输出的索引和形状。
 
 迁移到其他 policy 时，融合位置应满足：
 
@@ -177,6 +197,9 @@ tactile slice 或显式携带 token mask。
 target 路径必须位于 `no_grad` 中并在 loss 前 detach。predictor 和 shared tactile trunk 接受梯度，
 EMA/frozen teacher 不接受梯度。
 
+named `jepa` 的三个 target 均在同一 teacher space 内改为 `z(t+k)-z(t)`；HTD 仍使用 absolute
+future tactile latent。这样 `absolute z representation` 可作为独立 ablation。
+
 ## 6. Loss
 
 每个 JEPA 分支复用同一个方向加模长损失：
@@ -185,6 +208,9 @@ EMA/frozen teacher 不接受梯度。
 L_jepa = mean(1 - cosine(pred, target)
               + beta * smooth_l1(norm(pred), norm(target)))
 ```
+
+delta target 可能严格或近似为 0；此时 cosine 没有定义。实现会屏蔽 target norm `<=1e-6` 的方向项，
+但保留 magnitude 项，继续约束预测也接近 0。
 
 模长项用于降低纯 cosine 表征塌缩风险。当前 `beta = tactile_dream_beta = 1.0`。
 
@@ -228,6 +254,9 @@ tactile_raw_dim, tactile_valid_idx, tactile_region_sizes
 tactile_encoder_type, tactile_region_rows, tactile_region_cols
 tactile_cnn_channels, tactile_cnn_pool, tactile_cnn_coord, tactile_cnn_coord_scale
 n_tactile_tokens, tactile_hidden_dim
+use_tactile_temporal, tactile_history_length
+tactile_temporal_layers, tactile_temporal_heads
+use_delta_targets
 dream_horizon, ema_decay, lambda_tactile, tactile_dream_beta
 dream_state, lambda_state
 dream_vision, lambda_vision, vision_horizon
@@ -257,7 +286,7 @@ ablation 和故障隔离面。
 
 ### 数据与 layout
 
-- 256 -> 112 的索引唯一、范围正确、region size/grid 一致。
+- 768 -> 624 的索引唯一、范围正确、region size/grid 一致。
 - tactile/state/video 的 index 0 和未来 index 1..horizon 时间对齐。
 - episode 尾部 padding 不跨 episode。
 - 双相机 future image 顺序和 reshape 顺序一致。
@@ -308,8 +337,8 @@ ablation 和故障隔离面。
    `gradient_accumulation_steps == 1` 时才等价于每 optimizer step 一次。其他仓库应把 EMA 放到
    optimizer-step hook；否则有效 decay 会改变。
 2. **Vision teacher 冻结条件**：`no_grad` 只阻断 target 梯度，不会阻止 optimizer 改同一个 vision
-   tower。当前命令默认 `tune_visual=False`，因此 teacher 固定；若开启 visual finetune，必须另建
-   frozen/EMA teacher，或明确接受 moving target。
+   tower。启动器在 vision-JEPA 下要求 `tune_visual=False`；若未来需要 visual finetune，必须另建
+   frozen/EMA teacher。
 3. **State target augmentation**：processor 的 `state_dropout_prob` 会在 state future target 编码前
    把整个 state window 置零，而 action head 还会独立 dropout 当前 state feature。做干净 JEPA 对照时，
    建议 target 使用未增强 state，或先把 `state_dropout_prob` 设为 0。
@@ -334,4 +363,3 @@ ablation 和故障隔离面。
 - 当前可复现 baseline 必须先保留线性 `/255`。
 - `sqrt`/`log` 等稀疏重尾输入缩放可作为独立对照，只改
   `TactileEncoder.select_and_normalize()`，并从头训练；不要和跨仓库迁移同时引入。
-

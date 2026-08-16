@@ -119,15 +119,49 @@ def test_extract_step_data_end_boundary_padding():
     assert np.array_equal(raw[-1], raw[-2])
 
 
+def test_extract_step_data_start_boundary_padding_for_temporal_history():
+    df = _fake_episode(n_frames=12)
+    configs = _tactile_only_configs()
+    configs["tactile"].delta_indices = [-3, -2, -1, 0, 1, 2, 3, 4]
+
+    step = extract_step_data(
+        df,
+        step_index=0,
+        modality_configs=configs,
+        embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+        allow_padding=True,
+    )
+    raw = np.concatenate([step.tactile[key] for key in ("vest", "left_arm", "right_arm")], axis=-1)
+
+    assert raw.shape == (8, 768)
+    assert np.array_equal(raw[0], raw[1])
+    assert np.array_equal(raw[1], raw[2])
+    assert np.array_equal(raw[2], raw[3])
+
+
 @pytest.mark.parametrize(
-    ("name", "use_tactile", "dream_state", "dream_vision"),
+    (
+        "name",
+        "use_tactile",
+        "dream_state",
+        "dream_vision",
+        "use_tactile_temporal",
+        "use_delta_targets",
+    ),
     [
-        ("notactile", "notac", False, False),
-        ("htd", "dream", False, False),
-        ("jepa", "dream", True, True),
+        ("notactile", "notac", False, False, False, False),
+        ("htd", "dream", False, False, False, False),
+        ("jepa", "dream", True, True, True, True),
     ],
 )
-def test_named_tactile_modes_are_fixed(name, use_tactile, dream_state, dream_vision):
+def test_named_tactile_modes_are_fixed(
+    name,
+    use_tactile,
+    dream_state,
+    dream_vision,
+    use_tactile_temporal,
+    use_delta_targets,
+):
     settings = resolve_tactile_mode(
         name,
         use_tactile="input",
@@ -136,10 +170,18 @@ def test_named_tactile_modes_are_fixed(name, use_tactile, dream_state, dream_vis
     )
 
     assert settings == NAMED_TACTILE_MODES[name]
-    assert (settings.use_tactile, settings.dream_state, settings.dream_vision) == (
+    assert (
+        settings.use_tactile,
+        settings.dream_state,
+        settings.dream_vision,
+        settings.use_tactile_temporal,
+        settings.use_delta_targets,
+    ) == (
         use_tactile,
         dream_state,
         dream_vision,
+        use_tactile_temporal,
+        use_delta_targets,
     )
 
 
@@ -151,6 +193,7 @@ def test_named_modes_load_only_their_auxiliary_future_windows(name):
         NAMED_TACTILE_MODES[name],
         dream_horizon=4,
         vision_horizon=4,
+        tactile_history_length=4,
     )
 
     assert modality_config["state"].delta_indices == ([0, 1, 2, 3, 4] if name == "jepa" else [0])
@@ -158,7 +201,8 @@ def test_named_modes_load_only_their_auxiliary_future_windows(name):
     if name == "notactile":
         assert "tactile" not in modality_config
     else:
-        assert modality_config["tactile"].delta_indices == [0, 1, 2, 3, 4]
+        expected = [-3, -2, -1, 0, 1, 2, 3, 4] if name == "jepa" else [0, 1, 2, 3, 4]
+        assert modality_config["tactile"].delta_indices == expected
 
 
 def test_legacy_tactile_switches_remain_available():
@@ -228,3 +272,12 @@ def test_checkpoint_load_preserves_resolved_backbone_path(monkeypatch, tmp_path)
 
     assert captured["checkpoint"] == config.training.start_from_checkpoint
     assert captured["kwargs"]["model_name"] == config.model.model_name
+    assert captured["kwargs"]["use_tactile_temporal"] == config.model.use_tactile_temporal
+    assert captured["kwargs"]["tactile_history_length"] == config.model.tactile_history_length
+    assert captured["kwargs"]["tactile_temporal_layers"] == config.model.tactile_temporal_layers
+    assert captured["kwargs"]["tactile_temporal_heads"] == config.model.tactile_temporal_heads
+    assert captured["kwargs"]["use_delta_targets"] == config.model.use_delta_targets
+    assert (
+        captured["kwargs"]["tactile_token_chunk_targets"]
+        == config.model.tactile_token_chunk_targets
+    )

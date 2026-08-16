@@ -19,8 +19,10 @@ from gr00t.data.tactile_layout import get_region_grids, get_region_sizes, get_va
 from gr00t.model.modules.tactile_encoder import (
     TactileDreamHead,
     TactileEncoder,
+    TactileTemporalEncoder,
     build_ema_teacher,
     ema_update,
+    latent_prediction_target,
     touch_dreaming_loss,
 )
 import torch
@@ -29,7 +31,7 @@ import torch
 EMBED = 1536
 N_TOKENS = 8
 HIDDEN = 256  # small for a fast CPU test
-RAW = 256
+RAW = 768
 TAU = 4
 TRUNK = 1024
 
@@ -45,7 +47,7 @@ def _make_encoder(valid_idx, region_sizes):
     )
 
 
-def test_encoder_six_region_shapes():
+def test_encoder_eight_region_shapes():
     enc = _make_encoder(get_valid_idx(), get_region_sizes())
     raw = torch.randint(0, 256, (3, RAW)).float()
     tokens = enc(raw)
@@ -73,7 +75,7 @@ def _make_cnn_encoder(valid_idx, region_sizes, region_grids):
     )
 
 
-def test_cnn_encoder_six_region_shapes():
+def test_cnn_encoder_eight_region_shapes():
     # get_region_grids() includes the degenerate 1x4 shoulder strips, exercising
     # the pool-clamp path (pool (2,2) -> (1,2) for a 1-row region).
     enc = _make_cnn_encoder(get_valid_idx(), get_region_sizes(), get_region_grids())
@@ -147,6 +149,35 @@ def test_dream_head_and_loss():
     # identical pred/target -> direction term 0, magnitude term 0
     zero = touch_dreaming_loss(target, target, beta=1.0)
     assert float(zero) < 1e-5
+    zero_delta = torch.zeros_like(target)
+    assert float(touch_dreaming_loss(zero_delta, zero_delta, beta=1.0)) == 0.0
+
+
+def test_temporal_encoder_fuses_history_and_backpropagates():
+    encoder = TactileTemporalEncoder(
+        embed_dim=32,
+        hidden_dim=16,
+        history_length=4,
+        num_layers=1,
+        num_heads=4,
+    )
+    tokens = torch.randn(2, 4, 3, 32, requires_grad=True)
+    output = encoder(tokens)
+    assert output.shape == (2, 3, 32)
+    output.sum().backward()
+    assert tokens.grad is not None
+    assert float(tokens.grad[:, :-1].abs().sum()) > 0
+
+
+def test_latent_prediction_target_subtracts_current_latent():
+    future = torch.tensor([[[2.0, 5.0], [4.0, 8.0]]])
+    current = torch.tensor([[1.0, 3.0]])
+
+    assert latent_prediction_target(future, current, False) is future
+    assert torch.equal(
+        latent_prediction_target(future, current, True),
+        torch.tensor([[[1.0, 2.0], [3.0, 5.0]]]),
+    )
 
 
 def test_ema_teacher_tracks_student():

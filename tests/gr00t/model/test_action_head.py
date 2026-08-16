@@ -121,6 +121,49 @@ class TestActionHeadForward:
         out = head.forward(_make_backbone_output(config), _make_action_input(config))
         assert torch.isfinite(out["loss"])
 
+    def test_full_tactile_jepa_forward_and_backward(self):
+        config = _small_config(
+            use_tactile=True,
+            use_tactile_dream=True,
+            use_tactile_temporal=True,
+            tactile_history_length=4,
+            tactile_hidden_dim=32,
+            tactile_temporal_heads=4,
+            dream_horizon=4,
+            dream_state=True,
+            dream_vision=True,
+            vision_horizon=4,
+            use_delta_targets=True,
+        )
+        head = Gr00tN1d7ActionHead(config).float().train()
+        action_input = _make_action_input(config)
+        action_input["state"] = torch.randn(
+            2,
+            config.state_history_length + config.dream_horizon,
+            config.max_state_dim,
+        )
+        action_input["tactile"] = torch.randint(
+            0,
+            256,
+            (2, config.tactile_history_length + config.dream_horizon, config.tactile_raw_dim),
+        ).float()
+        action_input["vision_current"] = torch.randn(2, config.backbone_embedding_dim)
+        action_input["vision_target"] = torch.randn(
+            2, config.vision_horizon, config.backbone_embedding_dim
+        )
+
+        out = head(_make_backbone_output(config), action_input)
+
+        assert {"tactile_loss", "state_jepa_loss", "vision_jepa_loss"} <= set(out)
+        assert torch.isfinite(out["loss"])
+        out["loss"].backward()
+        assert any(
+            parameter.grad is not None and torch.isfinite(parameter.grad).all()
+            for parameter in head.tactile_temporal_encoder.parameters()
+        )
+        assert all(parameter.grad is None for parameter in head.tactile_target_encoder.parameters())
+        assert all(parameter.grad is None for parameter in head.state_target_encoder.parameters())
+
 
 class TestActionHeadGetAction:
     """Test inference (denoising loop)."""

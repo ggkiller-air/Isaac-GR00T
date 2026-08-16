@@ -187,6 +187,10 @@ class Gr00tN1d7Config(PretrainedConfig):
     tactile_cnn_coord_scale: float = 0.1
     n_tactile_tokens: int = 8  # number of slot tokens injected into sa_embs
     tactile_hidden_dim: int = 512  # per-region / dream-head MLP hidden width
+    use_tactile_temporal: bool = False
+    tactile_history_length: int = 4
+    tactile_temporal_layers: int = 1
+    tactile_temporal_heads: int = 8
     dream_horizon: int = 4  # tau: future tactile frames predicted (must be <= delta_indices reach)
     ema_decay: float = 0.99  # EMA target-encoder decay (HTD Eq. 4)
     lambda_tactile: float = 0.5  # weight of touch-dreaming loss in total loss
@@ -197,11 +201,14 @@ class Gr00tN1d7Config(PretrainedConfig):
     # control: tactile is encoded and injected into sa_embs as a plain input only,
     # no dream head / EMA teacher / auxiliary loss is built or run.
     use_tactile_dream: bool = True
+    use_delta_targets: bool = False
+    tactile_token_chunk_targets: bool = False
     # --- Tactile JEPA: predict future *other-modality* latents from the post-DiT
     # tactile trunk (shares the HTD dream machinery: EMA target encoder + a
     # TactileDreamHead-shaped predictor + touch_dreaming_loss). All branches are
     # training-only and gated on use_tactile + use_tactile_dream (the trunk comes
-    # from the post-DiT tactile tokens). Absolute (non-delta) targets, per design.
+    # from the post-DiT tactile tokens). Targets are absolute by default; the full
+    # JEPA mode predicts future-minus-current latents for all three branches.
     # State branch: EMA(state_encoder) encodes the future state window into the
     # target; requires the dataset's state modality to load a future window
     # (delta_indices >= dream_horizon+1) and state_history_length == 1.

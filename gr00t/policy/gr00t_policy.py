@@ -104,6 +104,10 @@ class Gr00tPolicy(BasePolicy):
         self.requires_tactile = bool(
             getattr(getattr(model, "action_head", None), "use_tactile", False)
         )
+        self.tactile_history_length = getattr(
+            getattr(model, "action_head", None), "tactile_history_length", 1
+        )
+        self._tactile_history: dict[str, np.ndarray] | None = None
 
         # Load the processor for input/output transformation.
         # Training saves processor files under a "processor/" subdirectory, but
@@ -194,9 +198,7 @@ class Gr00tPolicy(BasePolicy):
                 "language": {k: v[i] for k, v in value["language"].items()},
             }
             if "tactile" in value:
-                unbatched_value["tactile"] = {
-                    k: v[i] for k, v in value["tactile"].items()
-                }
+                unbatched_value["tactile"] = {k: v[i] for k, v in value["tactile"].items()}
             unbatched_obs.append(unbatched_value)
         return unbatched_obs
 
@@ -363,9 +365,7 @@ class Gr00tPolicy(BasePolicy):
                 "Observation contains tactile data, but this checkpoint has no tactile config"
             )
             for tactile_key in tactile_cfg.modality_keys:
-                assert tactile_key in tactile, (
-                    f"Tactile key '{tactile_key}' must be in observation"
-                )
+                assert tactile_key in tactile, f"Tactile key '{tactile_key}' must be in observation"
                 batched_tactile = tactile[tactile_key]
                 assert isinstance(batched_tactile, np.ndarray), (
                     f"Tactile key '{tactile_key}' must be a numpy array. "
@@ -456,6 +456,9 @@ class Gr00tPolicy(BasePolicy):
         Returns:
             Tuple of (actions_dict, info_dict)
         """
+        if self.requires_tactile and self.tactile_history_length > 1 and "tactile" in observation:
+            observation = self._append_tactile_history(observation)
+
         # Step 1: Split batched observation into individual observations
         unbatched_observations = self._unbatch_observation(observation)
         processed_inputs = []
@@ -490,6 +493,26 @@ class Gr00tPolicy(BasePolicy):
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
         return casted_action, {}
+
+    def _append_tactile_history(self, observation: dict[str, Any]) -> dict[str, Any]:
+        current = observation["tactile"]
+        batch_size = next(iter(current.values())).shape[0]
+        history_is_valid = self._tactile_history is not None and all(
+            value.shape[0] == batch_size for value in self._tactile_history.values()
+        )
+        if not history_is_valid:
+            self._tactile_history = {
+                key: np.repeat(value, self.tactile_history_length, axis=1)
+                for key, value in current.items()
+            }
+        else:
+            self._tactile_history = {
+                key: np.concatenate((self._tactile_history[key][:, 1:], value), axis=1)
+                for key, value in current.items()
+            }
+        windowed = dict(observation)
+        windowed["tactile"] = {key: value.copy() for key, value in self._tactile_history.items()}
+        return windowed
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.
@@ -548,6 +571,7 @@ class Gr00tPolicy(BasePolicy):
         Returns:
             Dictionary containing the info after resetting the policy
         """
+        self._tactile_history = None
         return {}
 
 
