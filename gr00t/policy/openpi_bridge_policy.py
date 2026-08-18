@@ -27,6 +27,7 @@ import numpy as np
 
 from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
 from gr00t.policy.policy import BasePolicy
+from gr00t.policy.sonic_websocket_client import SonicWebsocketClient
 
 
 _SONIC_TAG = "unitree_g1_sonic"
@@ -57,11 +58,7 @@ class OpenpiBridgePolicy(BasePolicy):
         default_prompt: str | None = None,
     ):
         super().__init__(strict=strict)
-        # Keep the optional pure-Python bridge dependency lazy so importing the
-        # native GR00T policy package does not require openpi-client.
-        from openpi_client.websocket_client_policy import WebsocketClientPolicy
-
-        self.client = WebsocketClientPolicy(host=host, port=port)
+        self.client = SonicWebsocketClient(host=host, port=port)
         self.modality_configs = MODALITY_CONFIGS[_SONIC_TAG]
         self.state_keys = list(self.modality_configs["state"].modality_keys)  # 8 groups -> 46-d
         self.video_keys = list(self.modality_configs["video"].modality_keys)  # ego_view_left/right
@@ -87,13 +84,14 @@ class OpenpiBridgePolicy(BasePolicy):
                     f"{metadata.get(key)!r}, expected {value!r}"
                 )
         if not isinstance(metadata.get("requires_tactile"), bool):
-            raise ValueError(
-                "Incompatible SONIC backend metadata: requires_tactile must be bool"
-            )
+            raise ValueError("Incompatible SONIC backend metadata: requires_tactile must be bool")
 
     # Served to the GR00T client over the "get_modality_config" endpoint.
     def get_modality_config(self) -> dict:
         return self.modality_configs
+
+    def get_deployment_metadata(self) -> dict[str, Any]:
+        return self.backend_metadata
 
     def reset(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
         return {}
@@ -232,8 +230,8 @@ class OpenpiBridgePolicy(BasePolicy):
             rhand.append(actions[:, _MOTION_TOKEN_DIM + _LEFT_HAND_DIM : _ACTION_DIM])
 
         action = {
-            "motion_token": np.stack(motion).astype(np.float32),       # (B, 40, 64)
-            "left_hand_joints": np.stack(lhand).astype(np.float32),    # (B, 40, 7)
-            "right_hand_joints": np.stack(rhand).astype(np.float32),   # (B, 40, 7)
+            "motion_token": np.stack(motion).astype(np.float32),  # (B, 40, 64)
+            "left_hand_joints": np.stack(lhand).astype(np.float32),  # (B, 40, 7)
+            "right_hand_joints": np.stack(rhand).astype(np.float32),  # (B, 40, 7)
         }
         return action, {}

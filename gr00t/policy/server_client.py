@@ -149,6 +149,11 @@ class PolicyServer:
             getattr(self.policy, "get_modality_config", lambda: {}),
             requires_input=False,
         )
+        self.register_endpoint(
+            "get_deployment_metadata",
+            getattr(self.policy, "get_deployment_metadata", lambda: {}),
+            requires_input=False,
+        )
 
     def _kill_server(self):
         """
@@ -311,6 +316,9 @@ class PolicyClient(BasePolicy):
 
     def get_modality_config(self) -> dict[str, ModalityConfig]:
         return self.call_endpoint("get_modality_config", requires_input=False)
+
+    def get_deployment_metadata(self) -> dict[str, Any]:
+        return self.call_endpoint("get_deployment_metadata", requires_input=False)
 
     def check_observation(self, observation: dict[str, Any]) -> None:
         raise NotImplementedError(
