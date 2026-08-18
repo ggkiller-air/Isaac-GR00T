@@ -67,6 +67,8 @@ class OpenpiBridgePolicy(BasePolicy):
         self.backend_metadata = self.client.get_server_metadata()
         self._validate_backend_metadata(self.backend_metadata)
         self.requires_tactile = bool(self.backend_metadata["requires_tactile"])
+        self.tactile_history_length = int(self.backend_metadata["tactile_history_length"])
+        self._tactile_history: np.ndarray | None = None
 
     @staticmethod
     def _validate_backend_metadata(metadata: dict[str, Any]) -> None:
@@ -85,6 +87,17 @@ class OpenpiBridgePolicy(BasePolicy):
                 )
         if not isinstance(metadata.get("requires_tactile"), bool):
             raise ValueError("Incompatible SONIC backend metadata: requires_tactile must be bool")
+        expected_history = metadata.get("tactile_history_length")
+        if not isinstance(expected_history, int) or isinstance(expected_history, bool):
+            raise ValueError(
+                "Incompatible SONIC backend metadata: tactile_history_length must be int"
+            )
+        if expected_history != (4 if metadata["requires_tactile"] else 0):
+            raise ValueError(
+                "Incompatible SONIC backend metadata: new-method checkpoints require "
+                f"tactile_history_length={4 if metadata['requires_tactile'] else 0}, "
+                f"got {expected_history}"
+            )
 
     # Served to the GR00T client over the "get_modality_config" endpoint.
     def get_modality_config(self) -> dict:
@@ -94,7 +107,24 @@ class OpenpiBridgePolicy(BasePolicy):
         return self.backend_metadata
 
     def reset(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
+        self._tactile_history = None
         return {}
+
+    def _append_tactile_history(self, tactile: dict[str, np.ndarray]) -> np.ndarray:
+        current = np.concatenate(
+            [np.asarray(tactile[key][:, 0], dtype=np.uint8) for key in _TACTILE_KEYS],
+            axis=-1,
+        )
+        batch_size = current.shape[0]
+        if self._tactile_history is None or self._tactile_history.shape[0] != batch_size:
+            self._tactile_history = np.repeat(
+                current[:, None], self.tactile_history_length, axis=1
+            )
+        else:
+            self._tactile_history = np.concatenate(
+                (self._tactile_history[:, 1:], current[:, None]), axis=1
+            )
+        return self._tactile_history.copy()
 
     def check_observation(self, observation: dict[str, Any]) -> None:
         for modality in ("video", "state", "language"):
@@ -189,6 +219,9 @@ class OpenpiBridgePolicy(BasePolicy):
 
         # Batch size from any video key: shape (B, T, H, W, C).
         batch_size = len(video[self.video_keys[0]])
+        tactile_history = None
+        if "tactile" in observation:
+            tactile_history = self._append_tactile_history(observation["tactile"])
 
         motion, lhand, rhand = [], [], []
         for i in range(batch_size):
@@ -205,14 +238,9 @@ class OpenpiBridgePolicy(BasePolicy):
                 "ego_view_right": np.asarray(video["ego_view_right"][i, 0]),
                 "prompt": self._extract_prompt(language, i),
             }
-            # Forward the current tactile frame if the deployment provides it. The openpi model
-            # (if trained with use_tactile) receives the three current device frames
-            # concatenated in the canonical vest/left/right order.
-            tactile = observation.get("tactile")
-            if tactile is not None:
-                obs_i["tactile"] = np.concatenate(
-                    [np.asarray(tactile[key][i, 0], dtype=np.uint8) for key in _TACTILE_KEYS]
-                )
+            # Forward the causal tactile history in canonical vest/left/right order.
+            if tactile_history is not None:
+                obs_i["tactile"] = tactile_history[i]
 
             out = self.client.infer(obs_i)
             if "actions" not in out:

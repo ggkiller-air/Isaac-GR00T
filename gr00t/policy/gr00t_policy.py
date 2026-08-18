@@ -562,6 +562,25 @@ class Gr00tPolicy(BasePolicy):
     def get_modality_config(self) -> dict[str, ModalityConfig]:
         return self.modality_configs
 
+    def get_deployment_metadata(self) -> dict[str, Any]:
+        if self.embodiment_tag != EmbodimentTag.UNITREE_G1_SONIC:
+            return {}
+        return {
+            "protocol": "sonic_vla_v1",
+            "backend": "isaac_gr00t",
+            "state_dim": 46,
+            "action_horizon": 40,
+            "action_dim": 78,
+            "video_keys": ["ego_view_left", "ego_view_right"],
+            "requires_tactile": self.requires_tactile,
+            "tactile_history_length": self.tactile_history_length if self.requires_tactile else 0,
+            "action_layout": {
+                "motion_token": [0, 64],
+                "left_hand_joints": [64, 71],
+                "right_hand_joints": [71, 78],
+            },
+        }
+
     def reset(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
         """Reset the policy to its initial state.
 

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.data.types import ModalityConfig
 from gr00t.policy.gr00t_policy import Gr00tPolicy
 from gr00t.policy.openpi_bridge_policy import OpenpiBridgePolicy
@@ -79,6 +80,17 @@ def test_gr00t_policy_rolls_tactile_history_and_reset():
     assert policy._tactile_history is None
 
 
+def test_native_gr00t_declares_four_frame_tactile_history():
+    policy = make_policy(requires_tactile=True)
+    policy.embodiment_tag = EmbodimentTag.UNITREE_G1_SONIC
+    policy.tactile_history_length = 4
+
+    metadata = policy.get_deployment_metadata()
+
+    assert metadata["backend"] == "isaac_gr00t"
+    assert metadata["tactile_history_length"] == 4
+
+
 def test_bridge_metadata_rejects_incompatible_backend():
     metadata = {
         "protocol": "sonic_vla_v1",
@@ -87,6 +99,50 @@ def test_bridge_metadata_rejects_incompatible_backend():
         "action_dim": 32,
         "video_keys": ["ego_view_left", "ego_view_right"],
         "requires_tactile": True,
+        "tactile_history_length": 4,
     }
     with pytest.raises(ValueError, match="action_dim"):
+        OpenpiBridgePolicy._validate_backend_metadata(metadata)
+
+
+def make_bridge_policy(history_length=4):
+    policy = OpenpiBridgePolicy.__new__(OpenpiBridgePolicy)
+    policy.tactile_history_length = history_length
+    policy._tactile_history = None
+    return policy
+
+
+def test_bridge_rolls_four_frame_tactile_history_and_reset():
+    policy = make_bridge_policy()
+    tactile = {
+        key: np.zeros((1, 1, 256), dtype=np.uint8)
+        for key in ("vest", "left_arm", "right_arm")
+    }
+
+    windows = []
+    for value in (1, 2, 3, 4):
+        for stream in tactile.values():
+            stream[:] = value
+        windows.append(policy._append_tactile_history(tactile)[:, :, 0])
+
+    np.testing.assert_array_equal(windows[0], [[1, 1, 1, 1]])
+    np.testing.assert_array_equal(windows[1], [[1, 1, 1, 2]])
+    np.testing.assert_array_equal(windows[2], [[1, 1, 2, 3]])
+    np.testing.assert_array_equal(windows[3], [[1, 2, 3, 4]])
+
+    policy.reset()
+    assert policy._tactile_history is None
+
+
+def test_bridge_requires_new_method_four_frame_contract():
+    metadata = {
+        "protocol": "sonic_vla_v1",
+        "state_dim": 46,
+        "action_horizon": 40,
+        "action_dim": 78,
+        "video_keys": ["ego_view_left", "ego_view_right"],
+        "requires_tactile": True,
+        "tactile_history_length": 1,
+    }
+    with pytest.raises(ValueError, match="new-method checkpoints require"):
         OpenpiBridgePolicy._validate_backend_metadata(metadata)
