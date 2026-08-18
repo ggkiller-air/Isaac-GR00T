@@ -278,6 +278,10 @@ def test_checkpoint_load_preserves_resolved_backbone_path(monkeypatch, tmp_path)
     assert captured["kwargs"]["tactile_temporal_heads"] == config.model.tactile_temporal_heads
     assert captured["kwargs"]["use_delta_targets"] == config.model.use_delta_targets
     assert (
+        captured["kwargs"]["predictor_tactile_source"]
+        == config.model.predictor_tactile_source
+    )
+    assert (
         captured["kwargs"]["tactile_token_chunk_targets"]
         == config.model.tactile_token_chunk_targets
     )

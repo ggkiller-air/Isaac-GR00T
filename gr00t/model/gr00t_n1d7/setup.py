@@ -109,6 +109,9 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 tactile_temporal_layers=getattr(self.config.model, "tactile_temporal_layers", 1),
                 tactile_temporal_heads=getattr(self.config.model, "tactile_temporal_heads", 8),
                 use_delta_targets=getattr(self.config.model, "use_delta_targets", False),
+                predictor_tactile_source=getattr(
+                    self.config.model, "predictor_tactile_source", "post_dit"
+                ),
                 tactile_token_chunk_targets=getattr(
                     self.config.model, "tactile_token_chunk_targets", False
                 ),

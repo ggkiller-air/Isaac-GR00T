@@ -177,6 +177,10 @@ class FinetuneConfig:
     use_delta_targets: bool = False
     """Predict future teacher latents relative to the corresponding current latent."""
 
+    predictor_tactile_source: Literal["pre_dit", "post_dit"] = "post_dit"
+    """Tactile-token source shared by all auxiliary predictors. The pre/post-DiT
+    ablation changes only this value; targets, branches, and loss weights stay unchanged."""
+
     tactile_token_chunk_targets: bool = False
     """Predict the complete future tactile slot-token chunk instead of pooled latents."""
 

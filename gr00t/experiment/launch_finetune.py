@@ -109,6 +109,7 @@ if __name__ == "__main__":
     config.model.use_tactile_temporal = tactile_settings.use_tactile_temporal
     config.model.tactile_history_length = ft_config.tactile_history_length
     config.model.use_delta_targets = tactile_settings.use_delta_targets
+    config.model.predictor_tactile_source = ft_config.predictor_tactile_source
     config.model.tactile_token_chunk_targets = ft_config.tactile_token_chunk_targets
     if config.model.tactile_token_chunk_targets and tactile_settings.use_tactile != "dream":
         raise ValueError("tactile token chunk targets require use_tactile='dream'")

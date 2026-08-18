@@ -22,6 +22,7 @@ and feed it synthetic backbone output tensors.
 
 from gr00t.configs.model.gr00t_n1d7 import Gr00tN1d7Config
 from gr00t.model.gr00t_n1d7.gr00t_n1d7 import Gr00tN1d7ActionHead
+from gr00t.model.modules.tactile_encoder import latent_prediction_target
 import pytest
 import torch
 from transformers.feature_extraction_utils import BatchFeature
@@ -121,8 +122,13 @@ class TestActionHeadForward:
         out = head.forward(_make_backbone_output(config), _make_action_input(config))
         assert torch.isfinite(out["loss"])
 
-    def test_full_tactile_jepa_forward_and_backward(self):
+    @pytest.mark.parametrize("predictor_tactile_source", ["pre_dit", "post_dit"])
+    def test_full_tactile_jepa_forward_and_backward(
+        self, monkeypatch, predictor_tactile_source
+    ):
         config = _small_config(
+            input_embedding_dim=96,
+            hidden_size=64,
             use_tactile=True,
             use_tactile_dream=True,
             use_tactile_temporal=True,
@@ -134,8 +140,60 @@ class TestActionHeadForward:
             dream_vision=True,
             vision_horizon=4,
             use_delta_targets=True,
+            predictor_tactile_source=predictor_tactile_source,
+            diffusion_model_cfg={
+                "positional_embeddings": None,
+                "num_layers": 2,
+                "num_attention_heads": 2,
+                "attention_head_dim": 48,
+                "norm_type": "ada_norm",
+                "dropout": 0.0,
+                "final_dropout": False,
+                "output_dim": 64,
+                "interleave_self_attention": True,
+            },
         )
         head = Gr00tN1d7ActionHead(config).float().train()
+        captured = {}
+        delta_calls = []
+
+        def capture_temporal_output(_module, _inputs, output):
+            captured["pre_dit"] = output.detach()
+
+        def capture_dit_output(_module, _inputs, output):
+            captured["post_dit"] = output[0].detach()
+
+        def capture_predictor_input(name):
+            def hook(_module, inputs):
+                captured[name] = inputs[0].detach()
+
+            return hook
+
+        def record_delta_target(future, current, use_delta):
+            target = latent_prediction_target(future, current, use_delta)
+            current_for_subtraction = current
+            if current.dim() == future.dim() - 1:
+                current_for_subtraction = current.unsqueeze(1)
+            assert use_delta is True
+            torch.testing.assert_close(target, future - current_for_subtraction)
+            delta_calls.append(target.detach())
+            return target
+
+        monkeypatch.setattr(
+            "gr00t.model.gr00t_n1d7.gr00t_n1d7.latent_prediction_target",
+            record_delta_target,
+        )
+        head.tactile_temporal_encoder.register_forward_hook(capture_temporal_output)
+        head.model.register_forward_hook(capture_dit_output)
+        head.tactile_dream_head.register_forward_pre_hook(
+            capture_predictor_input("tactile_context")
+        )
+        head.state_dream_head.register_forward_pre_hook(
+            capture_predictor_input("state_context")
+        )
+        head.vision_dream_head.register_forward_pre_hook(
+            capture_predictor_input("vision_context")
+        )
         action_input = _make_action_input(config)
         action_input["state"] = torch.randn(
             2,
@@ -155,6 +213,16 @@ class TestActionHeadForward:
         out = head(_make_backbone_output(config), action_input)
 
         assert {"tactile_loss", "state_jepa_loss", "vision_jepa_loss"} <= set(out)
+        assert len(delta_calls) == 3
+        if predictor_tactile_source == "pre_dit":
+            expected_context = head.model.proj_out_2(captured["pre_dit"]).mean(dim=1)
+        else:
+            expected_context = captured["post_dit"][:, 1 : 1 + head.n_tactile_tokens].mean(
+                dim=1
+            )
+        torch.testing.assert_close(captured["tactile_context"], expected_context)
+        torch.testing.assert_close(captured["state_context"], expected_context)
+        torch.testing.assert_close(captured["vision_context"], expected_context)
         assert torch.isfinite(out["loss"])
         out["loss"].backward()
         assert any(
@@ -163,6 +231,34 @@ class TestActionHeadForward:
         )
         assert all(parameter.grad is None for parameter in head.tactile_target_encoder.parameters())
         assert all(parameter.grad is None for parameter in head.state_target_encoder.parameters())
+
+    def test_predictor_source_ablation_does_not_change_modules(self):
+        common = dict(
+            use_tactile=True,
+            use_tactile_dream=True,
+            use_tactile_temporal=True,
+            tactile_history_length=4,
+            tactile_hidden_dim=32,
+            tactile_temporal_heads=4,
+            dream_horizon=4,
+            dream_state=True,
+            dream_vision=True,
+            vision_horizon=4,
+            use_delta_targets=True,
+        )
+        pre_dit = Gr00tN1d7ActionHead(
+            _small_config(**common, predictor_tactile_source="pre_dit")
+        )
+        post_dit = Gr00tN1d7ActionHead(
+            _small_config(**common, predictor_tactile_source="post_dit")
+        )
+
+        pre_shapes = {name: parameter.shape for name, parameter in pre_dit.named_parameters()}
+        post_shapes = {name: parameter.shape for name, parameter in post_dit.named_parameters()}
+        assert pre_shapes == post_shapes
+        assert sum(parameter.numel() for parameter in pre_dit.parameters()) == sum(
+            parameter.numel() for parameter in post_dit.parameters()
+        )
 
 
 class TestActionHeadGetAction:

@@ -202,19 +202,19 @@ class Gr00tN1d7Config(PretrainedConfig):
     # no dream head / EMA teacher / auxiliary loss is built or run.
     use_tactile_dream: bool = True
     use_delta_targets: bool = False
+    predictor_tactile_source: str = "post_dit"
     tactile_token_chunk_targets: bool = False
-    # --- Tactile JEPA: predict future *other-modality* latents from the post-DiT
-    # tactile trunk (shares the HTD dream machinery: EMA target encoder + a
+    # --- Tactile JEPA: predict future *other-modality* latents from the selected
+    # pre- or post-DiT tactile context (shares the HTD dream machinery: EMA target encoder + a
     # TactileDreamHead-shaped predictor + touch_dreaming_loss). All branches are
-    # training-only and gated on use_tactile + use_tactile_dream (the trunk comes
-    # from the post-DiT tactile tokens). Targets are absolute by default; the full
+    # training-only and gated on use_tactile + use_tactile_dream. Targets are absolute by default; the full
     # JEPA mode predicts future-minus-current latents for all three branches.
     # State branch: EMA(state_encoder) encodes the future state window into the
     # target; requires the dataset's state modality to load a future window
     # (delta_indices >= dream_horizon+1) and state_history_length == 1.
     dream_state: bool = False
     lambda_state: float = 0.5  # weight of the state-JEPA loss in total loss
-    # Vision branch: predict the future *vision* latent from the same post-DiT
+    # Vision branch: predict the future *vision* latent from the same selected
     # tactile trunk. Unlike state/tactile there is no clean+trained encoder to EMA,
     # so the target is the FROZEN backbone vision tower (`backbone.model.visual`)
     # run once over the future frames -- a fixed, pretrained teacher (no EMA, no

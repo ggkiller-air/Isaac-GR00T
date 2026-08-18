@@ -144,6 +144,14 @@ class Gr00tN1d7ActionHead(nn.Module):
                 getattr(config, "tactile_history_length", 4) if self.use_tactile_temporal else 1
             )
             self.use_delta_targets = getattr(config, "use_delta_targets", False)
+            self.predictor_tactile_source = getattr(
+                config, "predictor_tactile_source", "post_dit"
+            )
+            if self.predictor_tactile_source not in ("pre_dit", "post_dit"):
+                raise ValueError(
+                    "predictor_tactile_source must be 'pre_dit' or 'post_dit', got "
+                    f"{self.predictor_tactile_source!r}"
+                )
             self.tactile_token_chunk_targets = getattr(
                 config, "tactile_token_chunk_targets", False
             )
@@ -188,8 +196,8 @@ class Gr00tN1d7ActionHead(nn.Module):
                     dream_horizon=config.dream_horizon,
                     hidden_dim=config.tactile_hidden_dim,
                 )
-                # JEPA state branch: predict the future state latent from the same
-                # post-DiT tactile trunk. Target = EMA(state_encoder) over the future
+                # JEPA state branch: predict the future state latent from the shared
+                # selected tactile context. Target = EMA(state_encoder) over the future
                 # state window (which the dataset supplies by widening the state
                 # modality's delta_indices). Reuses the TactileDreamHead predictor
                 # shape and touch_dreaming_loss (cosine + magnitude, anti-collapse).
@@ -209,7 +217,7 @@ class Gr00tN1d7ActionHead(nn.Module):
                     )
 
                 # JEPA vision branch: predict the future *vision* latent from the same
-                # post-DiT tactile trunk. Unlike state/tactile there is no clean+trained
+                # selected tactile context. Unlike state/tactile there is no clean+trained
                 # encoder to EMA -- the target is the FROZEN backbone vision tower run
                 # over future frames (a fixed pretrained teacher; computed in the
                 # top-level Gr00tN1d7.forward and passed in via action_input). The target
@@ -530,9 +538,10 @@ class Gr00tN1d7ActionHead(nn.Module):
                 and tactile_raw.dim() == 3
                 and tactile_raw.shape[1] >= expected_tactile_steps
             ):
-                # Shared post-DiT tactile trunk: pooled over the tactile token
-                # positions [1 : 1 + N]. Every JEPA predictor head reads this.
-                tactile_trunk = model_output[:, 1 : 1 + self.n_tactile_tokens].mean(dim=1)
+                if self.predictor_tactile_source == "pre_dit":
+                    tactile_trunk = self.model.proj_out_2(tactile_features).mean(dim=1)
+                else:
+                    tactile_trunk = model_output[:, 1 : 1 + self.n_tactile_tokens].mean(dim=1)
                 total_loss = loss
                 D_emb, tau = self.input_embedding_dim, self.dream_horizon
                 B = tactile_trunk.shape[0]
