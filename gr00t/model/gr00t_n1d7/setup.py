@@ -104,6 +104,10 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                 use_tactile_dream=getattr(self.config.model, "use_tactile_dream", True),
                 tactile_encoder_type=getattr(self.config.model, "tactile_encoder_type", "mlp"),
                 tactile_cnn_coord=getattr(self.config.model, "tactile_cnn_coord", False),
+                tactile_deadband=getattr(self.config.model, "tactile_deadband", 0.0),
+                tactile_region_scales=getattr(self.config.model, "tactile_region_scales", None),
+                tactile_region_mask=getattr(self.config.model, "tactile_region_mask", None),
+                tactile_input_gate_init=getattr(self.config.model, "tactile_input_gate_init", None),
                 use_tactile_temporal=getattr(self.config.model, "use_tactile_temporal", False),
                 tactile_history_length=getattr(self.config.model, "tactile_history_length", 4),
                 tactile_temporal_layers=getattr(self.config.model, "tactile_temporal_layers", 1),
@@ -141,6 +145,14 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     )
                 logging.info("mask_token not in checkpoint - initialized")
 
+            gate_key = "action_head.tactile_input_gate_logit"
+            if gate_key in missing_keys and hasattr(model.action_head, "tactile_input_gate_logit"):
+                gate = float(model.config.tactile_input_gate_init)
+                gate_logit = torch.logit(torch.tensor(gate, dtype=torch.float32)).item()
+                with torch.no_grad():
+                    model.action_head.tactile_input_gate_logit.fill_(gate_logit)
+                logging.info("tactile input gate not in checkpoint - initialized to %.6f", gate)
+
             unexpected_keys = loading_info.get("unexpected_keys", [])
             mismatched_keys = loading_info.get("mismatched_keys", [])
             # Tactile / state-dream modules (encoder, EMA target encoder, dream
@@ -169,13 +181,37 @@ class Gr00tN1d7Pipeline(ModelPipeline):
                     f"{self.config.training.start_from_checkpoint}:\n" + "\n".join(errors)
                 )
 
+            action_head = getattr(model, "action_head", None)
+            if action_head is not None and getattr(action_head, "use_tactile", False):
+                direct_parameters = {
+                    "tactile slot query": action_head.tactile_encoder.aggregator.query,
+                }
+                if getattr(action_head, "use_tactile_temporal", False):
+                    direct_parameters["tactile temporal time embedding"] = (
+                        action_head.tactile_temporal_encoder.time_embedding
+                    )
+                if hasattr(action_head, "tactile_input_gate_logit"):
+                    direct_parameters["tactile input gate logit"] = (
+                        action_head.tactile_input_gate_logit
+                    )
+                invalid = []
+                for name, parameter in direct_parameters.items():
+                    values = parameter.detach().float()
+                    if not torch.isfinite(values).all():
+                        invalid.append(f"{name} contains non-finite values")
+                    elif values.abs().max().item() > 100.0:
+                        invalid.append(f"{name} has max_abs={values.abs().max().item():.3e}")
+                if invalid:
+                    raise RuntimeError(
+                        "Invalid tactile direct-parameter initialization: " + "; ".join(invalid)
+                    )
+
             # EMA target encoders are deepcopied from their online encoders in
             # __init__, i.e. *before* from_pretrained overwrites the online
             # encoders. For an online encoder that exists in the checkpoint
             # (e.g. state_encoder), the target would otherwise keep stale
             # pre-load (random) weights and diverge from the loaded online
             # encoder. Re-sync target <- online so JEPA targets start matched.
-            action_head = getattr(model, "action_head", None)
             if action_head is not None and getattr(action_head, "use_tactile_dream", False):
                 with torch.no_grad():
                     if getattr(action_head, "dream_state", False) and hasattr(

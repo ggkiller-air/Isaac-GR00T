@@ -165,6 +165,16 @@ class Gr00tN1d7Config(PretrainedConfig):
     tactile_raw_dim: int = 768
     tactile_valid_idx: list[int] | None = field(default_factory=_default_tactile_valid_idx)
     tactile_region_sizes: list[int] | None = field(default_factory=_default_tactile_region_sizes)
+    # Optional dataset-derived preprocessing. Defaults reproduce the legacy
+    # valid-select + /255 path exactly. Values are expanded per region inside
+    # TactileEncoder and serialized with the checkpoint for deployment parity.
+    tactile_deadband: float = 0.0
+    tactile_region_scales: list[float] | None = None
+    tactile_region_mask: list[float] | None = None
+    # Optional bounded learned multiplier on tokens entering the action trunk.
+    # None preserves the legacy ungated path; otherwise the sigmoid gate starts
+    # at this value and remains in (0, 1).
+    tactile_input_gate_init: float | None = None
     # Per-region encoder: "mlp" (default; flat per-region MLP) or "cnn" (per-region
     # 2D conv over each region's (rows, cols) grid -> adaptive pool -> MLP fuse).
     tactile_encoder_type: str = "mlp"
@@ -202,6 +212,8 @@ class Gr00tN1d7Config(PretrainedConfig):
     # no dream head / EMA teacher / auxiliary loss is built or run.
     use_tactile_dream: bool = True
     use_delta_targets: bool = False
+    # Predictor context: temporal tactile tokens before DiT, tactile positions
+    # after DiT, all current observation modalities before DiT, or complete trunk.
     predictor_tactile_source: str = "post_dit"
     tactile_token_chunk_targets: bool = False
     # --- Tactile JEPA: predict future *other-modality* latents from the selected

@@ -22,7 +22,8 @@ without touching the pretrained VLM+DiT:
     aggregator turn a raw ``uint8[raw_dim]`` skin packet into ``N`` tactile
     tokens of width ``embedding_dim`` (so they can be concatenated into the DiT
     ``sa_embs`` sequence). It owns the 768->624 valid-channel select and the
-    ``/255`` normalization, so the data pipeline only forwards the raw packet.
+    configurable deadband/region scaling, so the data pipeline only forwards
+    the raw packet. The default remains the legacy ``/255`` normalization.
 (C) :class:`TactileDreamHead` + :func:`touch_dreaming_loss` + an EMA target copy
     of the encoder implement the touch-dreaming auxiliary task: predict the
     *future* tactile latent from the shared trunk features. Per the paper this
@@ -177,7 +178,7 @@ class TactileSlotAggregator(nn.Module):
 
 
 class TactileEncoder(nn.Module):
-    """Raw skin packet -> tactile tokens, owning valid-select + ``/255``.
+    """Raw skin packet -> tactile tokens, owning selection and normalization.
 
     ``forward`` maps a single-timestep raw packet ``[B, raw_dim]`` to tactile
     tokens ``[B, num_tokens, embed_dim]`` for injection into ``sa_embs``.
@@ -200,6 +201,9 @@ class TactileEncoder(nn.Module):
         cnn_pool: tuple[int, int] = (2, 2),
         cnn_coord: bool = False,
         cnn_coord_scale: float = 1.0,
+        deadband: float = 0.0,
+        region_scales: list[float] | None = None,
+        region_mask: list[float] | None = None,
     ):
         super().__init__()
         assert sum(region_sizes) == len(valid_idx), (
@@ -212,6 +216,30 @@ class TactileEncoder(nn.Module):
         self.register_buffer(
             "valid_idx", torch.as_tensor(valid_idx, dtype=torch.long), persistent=False
         )
+        num_regions = len(region_sizes)
+        scales = [255.0] * num_regions if region_scales is None else list(region_scales)
+        mask = [1.0] * num_regions if region_mask is None else list(region_mask)
+        if len(scales) != num_regions:
+            raise ValueError(f"region_scales has {len(scales)} entries, expected {num_regions}")
+        if len(mask) != num_regions:
+            raise ValueError(f"region_mask has {len(mask)} entries, expected {num_regions}")
+        if float(deadband) < 0:
+            raise ValueError("tactile deadband must be non-negative")
+        if any(float(scale) <= 0 for scale in scales):
+            raise ValueError("all tactile region scales must be positive")
+        if any(float(value) < 0 or float(value) > 1 for value in mask):
+            raise ValueError("all tactile region mask values must be in [0, 1]")
+        channel_scales = torch.repeat_interleave(
+            torch.as_tensor(scales, dtype=torch.float32),
+            torch.as_tensor(region_sizes, dtype=torch.long),
+        )
+        channel_mask = torch.repeat_interleave(
+            torch.as_tensor(mask, dtype=torch.float32),
+            torch.as_tensor(region_sizes, dtype=torch.long),
+        )
+        self.deadband = float(deadband)
+        self.register_buffer("channel_scales", channel_scales, persistent=False)
+        self.register_buffer("channel_mask", channel_mask, persistent=False)
         # Per-region encoder: flat MLP (default) or 2D CNN over each region's grid.
         # Both emit [B, num_regions, embed_dim], so the aggregator / dream path are
         # identical regardless of choice.
@@ -236,8 +264,11 @@ class TactileEncoder(nn.Module):
 
     def select_and_normalize(self, raw: torch.Tensor) -> torch.Tensor:
         """``[..., raw_dim]`` (0-255) -> ``[..., num_valid]`` in ``[0, 1]``."""
-        valid = raw.index_select(-1, self.valid_idx)
-        return valid.to(self.aggregator.norm.weight.dtype) / 255.0
+        dtype = self.aggregator.norm.weight.dtype
+        valid = raw.index_select(-1, self.valid_idx).to(dtype)
+        scales = self.channel_scales.to(device=valid.device, dtype=dtype)
+        mask = self.channel_mask.to(device=valid.device, dtype=dtype)
+        return ((valid - self.deadband).clamp_min(0) / scales).clamp_max(1) * mask
 
     def forward(self, raw_current: torch.Tensor) -> torch.Tensor:
         # raw_current: [B, raw_dim] -> [B, num_tokens, embed_dim]

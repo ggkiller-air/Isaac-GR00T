@@ -219,9 +219,7 @@ class Gr00tTrainer(Trainer):
             if self.state.global_step == 0:
                 logging.info("Saving step-0 smoke checkpoint before training")
                 self._save_checkpoint(model, trial=None)
-                self.control = self.callback_handler.on_save(
-                    self.args, self.state, self.control
-                )
+                self.control = self.callback_handler.on_save(self.args, self.state, self.control)
             self._initial_checkpoint_saved = True
         return super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
 
@@ -298,11 +296,12 @@ class Gr00tTrainer(Trainer):
         """Use deterministic generated-action MSE for held-out validation."""
         del prediction_loss_only, ignore_keys
         inputs = self._prepare_inputs(inputs)
-        target = inputs["action"]
-        mask = inputs["action_mask"].to(dtype=target.dtype)
+        model_inputs = inputs["inputs"]
+        target = model_inputs["action"]
+        mask = model_inputs["action_mask"].to(dtype=target.dtype)
         inference_inputs = {
             key: value
-            for key, value in inputs.items()
+            for key, value in model_inputs.items()
             if key
             not in {
                 "action",
@@ -318,10 +317,14 @@ class Gr00tTrainer(Trainer):
             inference_inputs["state"] = inference_inputs["state"][:, :state_history]
         if "tactile" in inference_inputs and inference_inputs["tactile"].dim() == 3:
             inference_inputs["tactile"] = inference_inputs["tactile"][:, :1]
-        devices = [target.device.index] if target.is_cuda and target.device.index is not None else []
+        devices = (
+            [target.device.index] if target.is_cuda and target.device.index is not None else []
+        )
         with torch.no_grad(), torch.random.fork_rng(devices=devices):
             torch.manual_seed(self.args.seed + 10_000)
-            prediction = unwrapped_model.get_action(inference_inputs)["action_pred"].to(target.dtype)
+            prediction = unwrapped_model.get_action(inference_inputs)["action_pred"].to(
+                target.dtype
+            )
         mse = ((prediction - target).square() * mask).sum() / mask.sum().clamp_min(1)
         return mse.detach(), None, None
 

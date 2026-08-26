@@ -168,6 +168,15 @@ class FinetuneConfig:
         can encode where in a region a contact lands.
     Switching requires retraining (new params); "mlp" keeps prior runs unchanged."""
 
+    tactile_preprocess_config: str | None = None
+    """Optional JSON file containing ``deadband``, ``region_scales`` and
+    ``region_mask``. Expanded values are saved in the model checkpoint, so
+    training and deployment use the same tactile input contract."""
+
+    tactile_input_gate_init: float | None = None
+    """Optional initial value for a learned sigmoid gate on tactile tokens.
+    ``None`` preserves the legacy ungated path; otherwise must be in (0, 1)."""
+
     use_tactile_temporal: bool = False
     """Encode a causal tactile history window before DiT fusion. Named ``jepa`` enables it."""
 
@@ -177,9 +186,16 @@ class FinetuneConfig:
     use_delta_targets: bool = False
     """Predict future teacher latents relative to the corresponding current latent."""
 
-    predictor_tactile_source: Literal["pre_dit", "post_dit"] = "post_dit"
-    """Tactile-token source shared by all auxiliary predictors. The pre/post-DiT
-    ablation changes only this value; targets, branches, and loss weights stay unchanged."""
+    predictor_tactile_source: Literal[
+        "pre_dit", "post_dit", "pre_dit_all_modalities", "post_dit_all"
+    ] = "post_dit"
+    """Context source shared by all auxiliary predictors.
+
+    ``post_dit`` pools the post-DiT tactile positions, ``pre_dit_all_modalities``
+    fuses current VLM image, state, and tactile features before DiT, and
+    ``post_dit_all`` pools the complete post-DiT trunk sequence. Targets,
+    branches, and loss weights stay unchanged between these choices.
+    """
 
     tactile_token_chunk_targets: bool = False
     """Predict the complete future tactile slot-token chunk instead of pooled latents."""
@@ -276,14 +292,17 @@ class FinetuneConfig:
     wandb_project: str = "finetune-gr00t-n1d7"
     """W&B project name to log runs to."""
 
-    save_steps: int = 1000
+    save_steps: int = 10000
     """Frequency (in training steps) at which to save checkpoints."""
 
     save_total_limit: int = 5
     """Maximum number of checkpoints to keep before older ones are deleted."""
 
+    eval_strategy: Literal["no", "steps"] = "no"
+    """Validation strategy. The default training matrix runs without validation."""
+
     eval_steps: int | None = None
-    """Validation interval. Defaults to save_steps for SONIC fine-tuning."""
+    """Validation interval when eval_strategy is "steps". Defaults to save_steps."""
 
     eval_set_split_ratio: float = 0.05
     """Fraction of whole episodes held out for validation."""
@@ -304,7 +323,7 @@ class FinetuneConfig:
     You need to login to wandb to view the logs.
     """
 
-    max_steps: int = 10000
+    max_steps: int = 100000
     """Total number of training steps to run before stopping."""
 
     weight_decay: float = 1e-5

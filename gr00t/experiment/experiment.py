@@ -36,6 +36,22 @@ from gr00t.model import MODEL_REGISTRY
 from gr00t.utils.initial_actions import INITIAL_ACTIONS_FILENAME, save_initial_actions
 
 
+def wandb_run_metadata(experiment_name: str, data_mode: str) -> dict:
+    configured_tags = os.environ.get("WANDB_TAGS")
+    tags = (
+        [tag.strip() for tag in configured_tags.split(",") if tag.strip()]
+        if configured_tags
+        else [data_mode]
+    )
+    return {
+        "entity": os.environ.get("WANDB_ENTITY") or None,
+        "name": os.environ.get("WANDB_NAME", f"Isaac-GR00T / {experiment_name}"),
+        "group": os.environ.get("WANDB_RUN_GROUP", "sonic-htd-model-comparison"),
+        "job_type": os.environ.get("WANDB_JOB_TYPE", "comparison-training"),
+        "tags": tags,
+    }
+
+
 def setup_logging(debug: bool = False):
     """Configure logging."""
     logging.basicConfig(
@@ -158,11 +174,13 @@ def run(config: Config):
     omegaconf_config["save_steps"] = config.training.save_steps
     OmegaConf.save(omegaconf_config, save_cfg_dir / "conf.yaml", resolve=True)
     wandb_config_file = output_dir / "wandb_config.json"
+    wandb_metadata = wandb_run_metadata(experiment_name, config.data.mode)
     with open(wandb_config_file, "w") as f:
         json.dump(
             {
                 "project": config.training.wandb_project,
                 "run_id": experiment_name,
+                **wandb_metadata,
             },
             f,
         )
@@ -179,11 +197,8 @@ def run(config: Config):
 
         wandb.init(
             project=config.training.wandb_project,
-            name=f"Isaac-GR00T / {experiment_name}",
-            group="sonic-htd-model-comparison",
-            job_type="comparison-training",
             config=config_dict,
-            tags=[config.data.mode],
+            **wandb_metadata,
         )
         wandb.define_metric("comparison/*", step_metric="comparison/step")
 

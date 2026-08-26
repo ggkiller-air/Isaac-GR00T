@@ -46,6 +46,41 @@ def load_modality_config(modality_config_path: str):
         raise FileNotFoundError(f"Modality config path does not exist: {modality_config_path}")
 
 
+def load_tactile_preprocess_config(path: str) -> dict:
+    """Load and validate checkpoint-owned tactile preprocessing parameters."""
+    from gr00t.data.tactile_layout import get_region_keys
+
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Tactile preprocess config does not exist: {config_path}")
+    values = json.loads(config_path.read_text(encoding="utf-8"))
+    region_keys = get_region_keys()
+    if values.get("region_keys") != region_keys:
+        raise ValueError(
+            "Tactile preprocess region_keys do not match the SONIC layout: "
+            f"expected {region_keys}, got {values.get('region_keys')}"
+        )
+    for key in ("region_scales", "region_mask"):
+        if not isinstance(values.get(key), list) or len(values[key]) != len(region_keys):
+            raise ValueError(f"Tactile preprocess {key} must have {len(region_keys)} entries")
+    deadband = float(values.get("deadband", 0.0))
+    scales = [float(value) for value in values["region_scales"]]
+    mask = [float(value) for value in values["region_mask"]]
+    if deadband < 0:
+        raise ValueError("Tactile preprocess deadband must be non-negative")
+    if any(value <= 0 for value in scales):
+        raise ValueError("Tactile preprocess region_scales must be positive")
+    if any(value < 0 or value > 1 for value in mask):
+        raise ValueError("Tactile preprocess region_mask values must be in [0, 1]")
+    return {
+        "deadband": deadband,
+        "region_scales": scales,
+        "region_mask": mask,
+        "input_gate_init": values.get("input_gate_init"),
+        "path": str(config_path),
+    }
+
+
 if __name__ == "__main__":
     # Set LOGURU_LEVEL environment variable if not already set (default: INFO)
     if "LOGURU_LEVEL" not in os.environ:
@@ -106,6 +141,15 @@ if __name__ == "__main__":
         tactile_settings.use_tactile
     ]
     config.model.tune_tactile = ft_config.tune_tactile
+    config.model.tactile_input_gate_init = ft_config.tactile_input_gate_init
+    if ft_config.tactile_preprocess_config is not None:
+        tactile_preprocess = load_tactile_preprocess_config(ft_config.tactile_preprocess_config)
+        config.model.tactile_deadband = tactile_preprocess["deadband"]
+        config.model.tactile_region_scales = tactile_preprocess["region_scales"]
+        config.model.tactile_region_mask = tactile_preprocess["region_mask"]
+        if config.model.tactile_input_gate_init is None:
+            config.model.tactile_input_gate_init = tactile_preprocess["input_gate_init"]
+        print(f"[launch_finetune] Loaded tactile preprocessing: {tactile_preprocess['path']}")
     config.model.use_tactile_temporal = tactile_settings.use_tactile_temporal
     config.model.tactile_history_length = ft_config.tactile_history_length
     config.model.use_delta_targets = tactile_settings.use_delta_targets
@@ -179,12 +223,14 @@ if __name__ == "__main__":
     config.training.output_dir = ft_config.output_dir
     config.training.save_steps = ft_config.save_steps
     config.training.save_total_limit = ft_config.save_total_limit
-    config.training.eval_strategy = "steps"
+    config.training.eval_strategy = ft_config.eval_strategy
     config.training.eval_steps = ft_config.eval_steps or ft_config.save_steps
     config.training.eval_set_split_ratio = ft_config.eval_set_split_ratio
     config.training.eval_batch_size = ft_config.eval_batch_size
     config.training.eval_batches = ft_config.eval_batches
-    config.training.save_best_eval_metric_name = "eval_action_mse"
+    config.training.save_best_eval_metric_name = (
+        "eval_action_mse" if ft_config.eval_strategy == "steps" else ""
+    )
     config.training.save_best_eval_metric_greater_is_better = False
     config.training.num_gpus = ft_config.num_gpus
     config.training.use_wandb = ft_config.use_wandb

@@ -19,6 +19,7 @@ __pycache__/
 # ML / experiment outputs
 wandb/
 outputs/
+/outputs
 logs/
 runs/
 out/
@@ -173,5 +174,4 @@ offline_open_loop_eval_plots/
 /TactileDetails.md
 /TactilePlan.md
 /ClAUDE.md
-/tests
 /tactile_representation_spec.md

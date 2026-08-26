@@ -137,6 +137,51 @@ def test_encoder_fallback_single_region():
     assert float(norm.min()) >= 0.0 and float(norm.max()) <= 1.0
 
 
+def test_default_preprocessing_remains_exact_div255():
+    enc = _make_encoder(get_valid_idx(), get_region_sizes())
+    raw = torch.arange(RAW, dtype=torch.float32).remainder(256).unsqueeze(0)
+    selected = raw.index_select(-1, torch.as_tensor(get_valid_idx()))
+    assert torch.allclose(enc.select_and_normalize(raw), selected / 255.0)
+
+
+def test_dataset_preprocessing_masks_unused_left_sleeve():
+    sizes = get_region_sizes()
+    enc = TactileEncoder(
+        raw_dim=RAW,
+        valid_idx=get_valid_idx(),
+        region_sizes=sizes,
+        embed_dim=32,
+        num_tokens=4,
+        hidden_dim=16,
+        num_heads=4,
+        deadband=2.0,
+        region_scales=[10.0] * len(sizes),
+        region_mask=[1.0] * (len(sizes) - 2) + [0.0, 1.0],
+    )
+    normalized = enc.select_and_normalize(torch.full((1, RAW), 12.0))
+    left_start = sum(sizes[:-2])
+    left_end = left_start + sizes[-2]
+    assert torch.count_nonzero(normalized[:, left_start:left_end]) == 0
+    assert torch.all(normalized[:, :left_start] == 1)
+    assert torch.all(normalized[:, left_end:] == 1)
+
+
+def test_dataset_preprocessing_rejects_bad_region_metadata():
+    import pytest
+
+    with pytest.raises(ValueError, match="region_scales"):
+        TactileEncoder(
+            raw_dim=RAW,
+            valid_idx=get_valid_idx(),
+            region_sizes=get_region_sizes(),
+            embed_dim=32,
+            num_tokens=4,
+            hidden_dim=16,
+            num_heads=4,
+            region_scales=[42.0],
+        )
+
+
 def test_dream_head_and_loss():
     head = TactileDreamHead(in_dim=TRUNK, latent_dim=EMBED, dream_horizon=TAU, hidden_dim=HIDDEN)
     trunk = torch.randn(5, TRUNK)

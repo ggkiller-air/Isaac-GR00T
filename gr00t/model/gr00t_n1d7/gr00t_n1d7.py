@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import math
 from typing import Any, Tuple
 
 import torch
@@ -33,6 +34,7 @@ from gr00t.model.modules.embodiment_conditioned_mlp import (
 from gr00t.model.modules.tactile_encoder import (
     TactileDreamHead,
     TactileEncoder,
+    TactileSlotAggregator,
     TactileTemporalEncoder,
     build_ema_teacher,
     ema_update,
@@ -144,17 +146,19 @@ class Gr00tN1d7ActionHead(nn.Module):
                 getattr(config, "tactile_history_length", 4) if self.use_tactile_temporal else 1
             )
             self.use_delta_targets = getattr(config, "use_delta_targets", False)
-            self.predictor_tactile_source = getattr(
-                config, "predictor_tactile_source", "post_dit"
-            )
-            if self.predictor_tactile_source not in ("pre_dit", "post_dit"):
+            self.predictor_tactile_source = getattr(config, "predictor_tactile_source", "post_dit")
+            if self.predictor_tactile_source not in (
+                "pre_dit",
+                "post_dit",
+                "pre_dit_all_modalities",
+                "post_dit_all",
+            ):
                 raise ValueError(
-                    "predictor_tactile_source must be 'pre_dit' or 'post_dit', got "
+                    "predictor_tactile_source must be 'pre_dit', 'post_dit', "
+                    "'pre_dit_all_modalities', or 'post_dit_all', got "
                     f"{self.predictor_tactile_source!r}"
                 )
-            self.tactile_token_chunk_targets = getattr(
-                config, "tactile_token_chunk_targets", False
-            )
+            self.tactile_token_chunk_targets = getattr(config, "tactile_token_chunk_targets", False)
             self.tactile_encoder = TactileEncoder(
                 raw_dim=config.tactile_raw_dim,
                 valid_idx=tactile_valid_idx,
@@ -168,7 +172,25 @@ class Gr00tN1d7ActionHead(nn.Module):
                 cnn_pool=getattr(config, "tactile_cnn_pool", (2, 2)),
                 cnn_coord=getattr(config, "tactile_cnn_coord", False),
                 cnn_coord_scale=getattr(config, "tactile_cnn_coord_scale", 1.0),
+                deadband=getattr(config, "tactile_deadband", 0.0),
+                region_scales=getattr(config, "tactile_region_scales", None),
+                region_mask=getattr(config, "tactile_region_mask", None),
             )
+            tactile_input_gate_init = getattr(config, "tactile_input_gate_init", None)
+            if tactile_input_gate_init is not None:
+                gate = float(tactile_input_gate_init)
+                if not 0.0 < gate < 1.0:
+                    raise ValueError("tactile_input_gate_init must be in (0, 1)")
+                self.tactile_input_gate_logit = nn.Parameter(
+                    torch.tensor(math.log(gate / (1.0 - gate)), dtype=torch.float32)
+                )
+            if self.predictor_tactile_source == "pre_dit_all_modalities":
+                # VLM image features are wider than the predictor context. State and
+                # tactile reuse the DiT output projection; vision gets one matching
+                # projection before the three modality contexts are averaged.
+                self.vision_context_projection = nn.Linear(
+                    config.backbone_embedding_dim, self.hidden_size
+                )
             if self.use_tactile_temporal:
                 self.tactile_temporal_encoder = TactileTemporalEncoder(
                     embed_dim=self.input_embedding_dim,
@@ -260,6 +282,8 @@ class Gr00tN1d7ActionHead(nn.Module):
             self.action_decoder.requires_grad_(False)
             if self.config.add_pos_embed:
                 self.position_embedding.requires_grad_(False)
+            if getattr(self, "predictor_tactile_source", None) == "pre_dit_all_modalities":
+                self.vision_context_projection.requires_grad_(False)
         if not tune_diffusion_model:
             self.model.requires_grad_(False)
         if not tune_vlln:
@@ -273,6 +297,8 @@ class Gr00tN1d7ActionHead(nn.Module):
                     self.state_target_encoder.requires_grad_(False)
             if not tune_tactile:
                 self.tactile_encoder.requires_grad_(False)
+                if hasattr(self, "tactile_input_gate_logit"):
+                    self.tactile_input_gate_logit.requires_grad_(False)
                 if getattr(self, "use_tactile_temporal", False):
                     self.tactile_temporal_encoder.requires_grad_(False)
                 if getattr(self, "use_tactile_dream", False):
@@ -311,6 +337,11 @@ class Gr00tN1d7ActionHead(nn.Module):
                 self.vlln.eval()
                 self.vl_self_attention.eval()
             if getattr(self, "use_tactile", False):
+                if (
+                    getattr(self, "predictor_tactile_source", None) == "pre_dit_all_modalities"
+                    and not self.tune_projector
+                ):
+                    self.vision_context_projection.eval()
                 # EMA target encoders are always in eval; students only if frozen.
                 if getattr(self, "use_tactile_dream", False):
                     self.tactile_target_encoder.eval()
@@ -470,6 +501,10 @@ class Gr00tN1d7ActionHead(nn.Module):
         # unaffected. state(1) | tactile(N) | action(40).
         if self.use_tactile:
             tactile_features = self._tactile_features(action_input, actions.shape[0], device)
+            if hasattr(self, "tactile_input_gate_logit"):
+                tactile_features = tactile_features * torch.sigmoid(
+                    self.tactile_input_gate_logit
+                ).to(tactile_features.dtype)
             sa_embs = torch.cat((state_features, tactile_features, action_features), dim=1)
         else:
             sa_embs = torch.cat((state_features, action_features), dim=1)
@@ -540,6 +575,23 @@ class Gr00tN1d7ActionHead(nn.Module):
             ):
                 if self.predictor_tactile_source == "pre_dit":
                     tactile_trunk = self.model.proj_out_2(tactile_features).mean(dim=1)
+                elif self.predictor_tactile_source == "pre_dit_all_modalities":
+                    image_mask = getattr(backbone_output, "image_mask", None)
+                    if image_mask is None:
+                        raise ValueError("pre_dit_all_modalities requires backbone image_mask")
+                    valid_image = image_mask & backbone_output.backbone_attention_mask.bool()
+                    image_count = valid_image.sum(dim=1, keepdim=True).clamp_min(1)
+                    vision_features = (
+                        vl_embeds * valid_image.unsqueeze(-1).to(vl_embeds.dtype)
+                    ).sum(dim=1) / image_count.to(vl_embeds.dtype)
+                    state_context = self.model.proj_out_2(state_features).mean(dim=1)
+                    tactile_context = self.model.proj_out_2(tactile_features).mean(dim=1)
+                    vision_context = self.vision_context_projection(vision_features)
+                    tactile_trunk = torch.stack(
+                        (state_context, tactile_context, vision_context), dim=1
+                    ).mean(dim=1)
+                elif self.predictor_tactile_source == "post_dit_all":
+                    tactile_trunk = model_output.mean(dim=1)
                 else:
                     tactile_trunk = model_output[:, 1 : 1 + self.n_tactile_tokens].mean(dim=1)
                 total_loss = loss
@@ -556,9 +608,7 @@ class Gr00tN1d7ActionHead(nn.Module):
                         target_tokens = self.tactile_target_encoder(
                             future_raw.reshape(future_batch * future_steps, future_width)
                         )
-                        target_latent = target_tokens.reshape(
-                            future_batch, future_steps, -1
-                        )
+                        target_latent = target_tokens.reshape(future_batch, future_steps, -1)
                     else:
                         target_latent = self.tactile_target_encoder.encode_pooled(future_raw)
                     if self.use_delta_targets:
@@ -570,9 +620,7 @@ class Gr00tN1d7ActionHead(nn.Module):
                         )
                 dream_pred = self.tactile_dream_head(tactile_trunk)
                 target_width = (
-                    D_emb * self.n_tactile_tokens
-                    if self.tactile_token_chunk_targets
-                    else D_emb
+                    D_emb * self.n_tactile_tokens if self.tactile_token_chunk_targets else D_emb
                 )
                 assert dream_pred.shape == (B, tau, target_width), dream_pred.shape
                 tactile_loss = touch_dreaming_loss(
@@ -870,6 +918,21 @@ class Gr00tN1d7(PreTrainedModel):
 
     config_class = Gr00tN1d7Config
     supports_gradient_checkpointing = True
+
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize standard layers plus direct tactile parameters.
+
+        ``from_pretrained`` constructs missing modules under ``no_init_weights``.
+        Transformers reinitializes standard Linear/Attention/Norm layers, but it
+        cannot infer how to initialize direct ``nn.Parameter`` fields. The base
+        GR00T checkpoint has no tactile weights, so these two parameters must be
+        handled explicitly or they retain uninitialized memory.
+        """
+        super()._init_weights(module)
+        if isinstance(module, TactileSlotAggregator):
+            module.query.data.normal_(mean=0.0, std=0.02)
+        elif isinstance(module, TactileTemporalEncoder):
+            module.time_embedding.data.normal_(mean=0.0, std=0.02)
 
     def __init__(
         self,
